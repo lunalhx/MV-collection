@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0b">
+  <meta name="description" content="本地优先的私人视觉书签收藏库">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css?v=20260913-4">
+  <title>My Collection</title>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="回到首页">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span>My Collection</span>
+      </a>
+      <nav class="category-nav" id="categoryNav" aria-label="收藏分类"></nav>
+      <div class="sidebar-bottom">
+        <button class="side-link" id="settingsButton" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg>
+          设置
+        </button>
+        <span class="side-link side-link-muted">仅在本地保存</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="site-header">
+        <label class="search" aria-label="搜索收藏">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path></svg>
+          <input id="searchInput" type="search" placeholder="搜索你感兴趣的内容…" autocomplete="off">
+        </label>
+        <div class="header-actions">
+          <button class="button button-primary" id="addButton" type="button"><span aria-hidden="true">＋</span><span id="addButtonLabel">添加</span></button>
+        </div>
+      </header>
+
+      <main id="mainContent" tabindex="-1">
+        <section class="intro" aria-labelledby="pageTitle">
+          <div class="hero-art" aria-hidden="true">
+            <span class="hero-slide hero-slide-interstellar"></span>
+            <span class="hero-slide hero-slide-forrest-gump"></span>
+            <span class="hero-slide hero-slide-shawshank"></span>
+          </div>
+          <div class="intro-copy">
+            <p class="eyebrow">A LIFE IN MOVIES</p>
+            <h1 id="pageTitle">好电影，<em>值得一再重逢</em></h1>
+            <p class="intro-description">收藏打动你的每一帧，也收藏那些愿意重看的故事。</p>
+            <button class="hero-button" type="button" data-hero-add>开始收藏</button>
+          </div>
+          <div class="hero-caption"><b>经典重映</b><span>My Cinema Collection</span></div>
+        </section>
+        <section class="collection-toolbar" aria-label="收藏展示控制">
+          <div><h2 id="collectionTitle">最近添加 <span aria-hidden="true">›</span></h2><p id="collectionCount">0 个收藏</p></div>
+          <label class="sort-control"><span>排序</span><select id="sortSelect" aria-label="收藏排序">
+            <option value="createdAt">最近添加</option>
+            <option value="clickCount">点击最多</option>
+          </select></label>
+        </section>
+        <div id="content"></div>
+      </main>
+    </div>
+  </div>
+
+  <dialog class="modal" id="bookmarkDialog" aria-labelledby="bookmarkDialogTitle">
+    <form class="modal-card" id="bookmarkForm">
+      <div class="modal-heading">
+        <div>
+          <p class="eyebrow">COLLECTION ITEM</p>
+          <h2 id="bookmarkDialogTitle">添加收藏</h2>
+        </div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="bookmarkDialog" aria-label="关闭">×</button>
+      </div>
+      <input id="bookmarkId" type="hidden">
+      <div class="form-grid">
+        <div class="fields">
+          <label class="field"><span>标题</span><input id="titleInput" name="title" required maxlength="120" placeholder="例如 Interstellar"></label>
+          <label class="field"><span>网页地址</span><input id="urlInput" name="url" type="url" required placeholder="https://example.com"></label>
+          <label class="field"><span>分类</span><select id="categoryInput" name="category" required></select></label>
+          <label class="field"><span>所属博主（可选）</span><select id="creatorInput" name="creator"></select></label>
+          <label class="no-image-option" id="noImageField" hidden><input id="noImageInput" type="checkbox"><span><b>无需图片</b><small>仅用于网站分类，以文字卡片显示</small></span></label>
+          <label class="field"><span>显示比例</span><select id="aspectRatioInput" name="aspectRatio">
+            <option value="3:2" selected>3:2 · 横向海报</option>
+            <option value="3:4">3:4 · 竖版照片</option>
+          </select></label>
+          <label class="field file-field" id="imageField"><span>选择图片（可多选）</span><input id="imageInput" name="image" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple><span class="file-picker"><b>选取一张或多张图片</b><small id="fileName">JPG、PNG、WEBP</small></span></label>
+        </div>
+        <div class="image-preview" id="imagePreview"><span id="previewRatioLabel">3:2</span><p>图片预览</p></div>
+      </div>
+      <p class="form-error" id="formError" role="alert"></p>
+      <div class="modal-actions">
+        <button class="button button-quiet" type="button" data-close-dialog="bookmarkDialog">取消</button>
+        <button class="button button-primary" type="submit" id="saveButton">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal creator-modal" id="creatorDialog" aria-labelledby="creatorDialogTitle">
+    <form class="modal-card" id="creatorForm">
+      <div class="modal-heading">
+        <div>
+          <p class="eyebrow">CREATOR PROFILE</p>
+          <h2 id="creatorDialogTitle">添加博主</h2>
+        </div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="creatorDialog" aria-label="关闭">×</button>
+      </div>
+      <input id="creatorId" type="hidden">
+      <div class="creator-form-grid">
+        <div class="creator-avatar-preview" id="creatorAvatarPreview"><span id="creatorAvatarInitial">M</span><small>头像预览</small></div>
+        <div class="fields">
+          <label class="field"><span>博主名称</span><input id="creatorNameInput" required maxlength="80" placeholder="例如 Momo Film"></label>
+          <label class="field"><span>主页地址（可选）</span><input id="creatorUrlInput" type="url" placeholder="https://example.com"></label>
+          <label class="field"><span>简介（可选）</span><textarea id="creatorBioInput" maxlength="280" rows="4" placeholder="记录风格、平台或你关注 TA 的原因"></textarea></label>
+          <label class="field file-field"><span>头像或代表图片</span><input id="creatorAvatarInput" type="file" accept="image/jpeg,image/png,image/webp,image/gif"><span class="file-picker"><b>选择图片</b><small id="creatorAvatarFileName">JPG、PNG、WEBP</small></span></label>
+        </div>
+      </div>
+      <p class="form-error" id="creatorFormError" role="alert"></p>
+      <div class="modal-actions">
+        <button class="button button-quiet" type="button" data-close-dialog="creatorDialog">取消</button>
+        <button class="button button-primary" type="submit" id="saveCreatorButton">保存博主</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal settings-modal" id="settingsDialog" aria-labelledby="settingsTitle">
+    <div class="modal-card">
+      <div class="modal-heading">
+        <div><p class="eyebrow">LOCAL & PRIVATE</p><h2 id="settingsTitle">设置</h2></div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="settingsDialog" aria-label="关闭">×</button>
+      </div>
+      <section class="settings-section">
+        <div><h3>分类</h3><p>拖动左侧手柄或使用箭头调整顺序。删除分类不会删除其中的项目。</p></div>
+        <div id="categoryManager" class="category-manager"></div>
+        <form id="categoryForm" class="inline-form"><input id="newCategoryInput" required maxlength="30" placeholder="新分类名称"><button class="button button-quiet" type="submit">添加分类</button></form>
+      </section>
+      <section class="settings-section backup-section">
+        <div><h3>备份与恢复</h3><p>图片会一起写入 JSON 文件。导入时，相同 ID 的项目会被更新。</p></div>
+        <div class="backup-actions">
+          <button class="button button-quiet" id="exportButton" type="button">导出收藏</button>
+          <label class="button button-quiet file-button">导入收藏<input id="importInput" type="file" accept="application/json,.json"></label>
+        </div>
+      </section>
+      <p class="storage-note">所有数据只保存在当前浏览器的 IndexedDB 中，不会上传。</p>
+    </div>
+  </dialog>
+
+  <div class="menu" id="cardMenu" role="menu" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js?v=20260913-6"></script>
+</body>
+</html>

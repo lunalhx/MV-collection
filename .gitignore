@@ -1,0 +1,10 @@
+.DS_Store
+
+# Never commit private local collection exports.
+my-collection-backup-*.json
+*.backup.json
+
+# Keep local agent notes out of the public website repository.
+findings.md
+task_plan.md
+progress.md
