@@ -7,7 +7,7 @@
   <meta name="description" content="本地优先的私人视觉书签收藏库">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=20260914-6">
+  <link rel="stylesheet" href="css/style.css?v=20260914-7">
   <title>My Collection</title>
 </head>
 <body>
@@ -163,10 +163,12 @@
         </div>
       </section>
       <section class="settings-section backup-section">
-        <div><h3>备份与恢复</h3><p>Mac 主库导出带校验的分卷文件。恢复会在完整验证后替换本机资料库，不会自动合并。</p></div>
+        <div><h3>备份与恢复</h3><p>完整备份会覆盖目标设备。若只新增了几条，可导出变更并合并，不会删除对方多出来的收藏。</p></div>
         <div class="backup-actions">
           <button class="button button-quiet" id="exportButton" type="button">导出完整备份</button>
+          <button class="button button-quiet" id="exportDeltaButton" type="button">导出变更</button>
           <label class="button button-quiet file-button">完整替换恢复<input id="importInput" type="file" accept="application/json,.json,.mvpart,application/octet-stream" multiple></label>
+          <label class="button button-quiet file-button">合并变更<input id="importDeltaInput" type="file" accept="application/json,.json,.mvpart,application/octet-stream" multiple></label>
         </div>
         <p class="backup-progress" id="backupProgress"></p>
       </section>
@@ -187,6 +189,6 @@
   <div class="menu" id="cardMenu" role="menu" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="js/app.js?v=20260914-6"></script>
+  <script type="module" src="js/app.js?v=20260914-8"></script>
 </body>
 </html>

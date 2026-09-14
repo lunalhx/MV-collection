@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createBackupPart, inspectBackupFiles, packImagePart, parseBackupPart, planBackupParts, planBinaryParts, unpackImagePart, validateMultipartFiles, validateVolumeFiles } from '../js/backup.js';
+import { createBackupPart, inspectBackupFiles, packImagePart, parseBackupPart, planBackupParts, planBinaryParts, selectDeltaRecords, unpackImagePart, validateMultipartFiles, validateVolumeFiles } from '../js/backup.js';
 
 function imageGroup(groupId, bytes) {
   return {
@@ -13,6 +13,25 @@ function imageGroup(groupId, bytes) {
 test('binary planner splits after the 45MB budget without breaking a pair of sizes', () => {
   const parts = planBinaryParts([40 * 1024 * 1024, 10 * 1024 * 1024, 20 * 1024 * 1024], 45 * 1024 * 1024);
   assert.deepEqual(parts.map((part) => part.length), [1, 2]);
+});
+
+test('delta export keeps only bookmarks and related creators changed after the last backup', () => {
+  const since = '2026-09-14T00:00:00.000Z';
+  const selected = selectDeltaRecords({
+    since,
+    categories: [{ id: 'movies', name: '电影' }],
+    creators: [
+      { id: 'c1', name: 'A', createdAt: 1, updatedAt: 1 },
+      { id: 'c2', name: 'B', createdAt: 2, updatedAt: Date.parse('2026-09-14T12:00:00.000Z') }
+    ],
+    bookmarks: [
+      { id: 'old', title: 'Old', createdAt: 1, updatedAt: 1, creatorId: 'c1' },
+      { id: 'new', title: 'New', createdAt: Date.parse('2026-09-14T08:00:00.000Z'), creatorId: 'c1' }
+    ]
+  });
+  assert.deepEqual(selected.bookmarks.map((bookmark) => bookmark.id), ['new']);
+  assert.deepEqual(selected.creators.map((creator) => creator.id).sort(), ['c1', 'c2']);
+  assert.equal(selected.categories.length, 1);
 });
 
 test('mvpart round-trips display and thumbnail blobs without base64', async () => {

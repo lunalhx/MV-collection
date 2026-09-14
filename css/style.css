@@ -408,7 +408,7 @@ main { padding: 0 0 max(70px, env(safe-area-inset-bottom)); }
 .inline-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 10px; }
 .inline-form input { min-height: 39px; }
 .backup-section { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 25px; }
-.backup-actions { display: flex; gap: 8px; }
+.backup-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .backup-progress { grid-column: 1 / -1; min-height: 18px; }
 .file-button { display: inline-grid; place-items: center; cursor: pointer; }
 .file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }

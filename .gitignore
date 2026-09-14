@@ -3,6 +3,8 @@
 # Never commit private local collection exports.
 my-collection-backup-*.json
 my-collection-backup-*.mvpart
+my-collection-delta-*.json
+my-collection-delta-*.mvpart
 my-collection-backup-*-parts/
 *.backup.json
 

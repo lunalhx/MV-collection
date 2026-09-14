@@ -1,3 +1,5 @@
+import { serializeClickLedger } from './clicks.js';
+
 const IMAGE_PART_TARGET = 45 * 1024 * 1024;
 const MVPT_MAGIC = new Uint8Array([0x4D, 0x56, 0x50, 0x54]);
 
@@ -150,11 +152,20 @@ async function serializeCreators(creators) {
   })));
 }
 
-export async function exportVolumeBackup({ bookmarks, categories, creators, loadImageGroups, sourceDevice = 'Mac 主库', targetBytes = IMAGE_PART_TARGET, onProgress }) {
+export function selectDeltaRecords({ bookmarks = [], categories = [], creators = [], since } = {}) {
+  const sinceMs = Date.parse(since);
+  if (!Number.isFinite(sinceMs)) throw new Error('请先导出一次完整备份，之后才能导出变更');
+  const changedBookmarks = bookmarks.filter((bookmark) => (bookmark.updatedAt || bookmark.createdAt) > sinceMs);
+  const creatorIds = new Set(changedBookmarks.map((bookmark) => bookmark.creatorId).filter(Boolean));
+  const changedCreators = creators.filter((creator) => creatorIds.has(creator.id) || (creator.updatedAt || creator.createdAt) > sinceMs);
+  return { bookmarks: changedBookmarks, categories, creators: changedCreators };
+}
+
+export async function exportVolumeBackup({ bookmarks, categories, creators, loadImageGroups, sourceDevice = 'Mac 主库', targetBytes = IMAGE_PART_TARGET, onProgress, packaging = 'volume', since, allBookmarks }) {
   const backupId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const exportedAt = new Date().toISOString();
   const date = exportedAt.slice(0, 10);
-  const prefix = `my-collection-backup-${date}-${backupId.slice(0, 8)}`;
+  const prefix = `${packaging === 'delta' ? 'my-collection-delta' : 'my-collection-backup'}-${date}-${backupId.slice(0, 8)}`;
   const seenGroups = new Set();
   const imageFiles = [];
   let currentAssets = [];
@@ -177,7 +188,7 @@ export async function exportVolumeBackup({ bookmarks, categories, creators, load
   for (const bookmark of bookmarks) {
     const groups = await loadImageGroups(bookmark);
     if ((bookmark.imageIds?.length || 0) && groups.length !== bookmark.imageIds.length) {
-      throw new Error(`收藏“${bookmark.title}”缺少图片，无法导出完整备份`);
+      throw new Error(`收藏“${bookmark.title}”缺少图片，无法导出备份`);
     }
     for (const group of groups) {
       if (!group?.groupId || seenGroups.has(group.groupId)) continue;
@@ -207,7 +218,8 @@ export async function exportVolumeBackup({ bookmarks, categories, creators, load
       ...metadata,
       imageIds: metadata.imageIds || [],
       assetVersion: 1
-    }))
+    })),
+    clickCounts: serializeClickLedger(allBookmarks || bookmarks)
   };
   const dataBlob = new Blob([JSON.stringify(dataPayload)], { type: 'application/json' });
   const dataFile = { filename: dataFilename, role: 'data', bytes: dataBlob.size, sha256: await sha256(dataBlob) };
@@ -229,10 +241,11 @@ export async function exportVolumeBackup({ bookmarks, categories, creators, load
   const manifest = {
     format: 'poster-bookmarks-manifest',
     version: 4,
-    packaging: 'volume',
+    packaging,
     backupId,
     exportedAt,
     sourceDevice,
+    since: since || null,
     bookmarkCount: bookmarks.length,
     categoryCount: categories.length,
     creatorCount: creators.length,
@@ -314,6 +327,7 @@ export async function parseDataPart(file, expected = {}) {
     bookmarks: part.bookmarks,
     categories: part.categories,
     creators,
+    clickCounts: part.clickCounts && typeof part.clickCounts === 'object' ? part.clickCounts : null,
     partIndex: part.partIndex
   };
 }
@@ -332,7 +346,7 @@ export async function inspectBackupFiles(files) {
       || fileList.find((file) => file !== manifestFile && file.name.toLowerCase().includes('checksums'));
     if (!checksumsFile) throw new Error('缺少 checksums.json');
     const volume = await validateVolumeFiles(fileList, manifest, checksumsFile);
-    return { kind: 'v4', ...volume };
+    return { kind: manifest.packaging === 'delta' ? 'delta' : 'v4', ...volume };
   }
   if (manifest.version === 3) {
     const validated = await validateMultipartFiles(fileList);

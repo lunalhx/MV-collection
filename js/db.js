@@ -1,3 +1,5 @@
+import { applyClickLedger, mergeClickCounts, normalizeClickCounts, totalClicks } from './clicks.js';
+
 const DB_NAME = 'poster-bookmarks';
 const DB_VERSION = 4;
 const BOOKMARKS = 'bookmarks';
@@ -94,6 +96,8 @@ function lightweightBookmark(bookmark) {
   copy.imageIds = Array.isArray(bookmark.imageIds) ? bookmark.imageIds : [];
   copy.legacyImageCount = copy.imageIds.length ? 0 : legacyImages.length;
   copy.imageCount = copy.imageIds.length || copy.legacyImageCount;
+  copy.clickCounts = normalizeClickCounts(copy);
+  copy.clickCount = totalClicks(copy.clickCounts);
   return copy;
 }
 
@@ -347,6 +351,55 @@ export async function getAssetStats() {
   };
 }
 
+export async function getDeviceId() {
+  const existing = await getMeta('deviceId');
+  if (existing) return existing;
+  const deviceId = crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await setMeta('deviceId', deviceId);
+  return deviceId;
+}
+
+async function collectClickLedger(store) {
+  const ledger = {};
+  await new Promise((resolve, reject) => {
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      const bookmark = cursor.value;
+      ledger[bookmark.id] = {
+        clickCounts: normalizeClickCounts(bookmark),
+        lastClickedAt: bookmark.lastClickedAt || 0
+      };
+      cursor.continue();
+    };
+  });
+  return ledger;
+}
+
+function applyLedgerToStore(store, localLedger, incomingLedger = {}) {
+  return new Promise((resolve, reject) => {
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      const bookmark = cursor.value;
+      const incoming = mergeClickCounts(
+        incomingLedger[bookmark.id]?.clickCounts,
+        normalizeClickCounts(bookmark)
+      );
+      const updated = applyClickLedger(bookmark, {
+        clickCounts: mergeClickCounts(localLedger[bookmark.id]?.clickCounts, incoming),
+        lastClickedAt: Math.max(localLedger[bookmark.id]?.lastClickedAt || 0, incomingLedger[bookmark.id]?.lastClickedAt || 0, bookmark.lastClickedAt || 0)
+      });
+      cursor.update(updated);
+      cursor.continue();
+    };
+  });
+}
+
 export async function getMeta(key) {
   const db = await openDatabase();
   const transaction = db.transaction(META, 'readonly');
@@ -364,15 +417,16 @@ export async function setMeta(key, value) {
 
 export async function clearStagedSnapshot() {
   const db = await openDatabase();
-  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS, META];
   const transaction = db.transaction(stores, 'readwrite');
-  stores.forEach((name) => transaction.objectStore(name).clear());
+  [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS].forEach((name) => transaction.objectStore(name).clear());
+  transaction.objectStore(META).delete('stagedClickCounts');
   await transactionDone(transaction);
 }
 
-export async function stageSnapshotPart({ bookmarks = [], categories = [], creators = [], imageAssets = [] }) {
+export async function stageSnapshotPart({ bookmarks = [], categories = [], creators = [], imageAssets = [], clickCounts }) {
   const db = await openDatabase();
-  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS, META];
   const transaction = db.transaction(stores, 'readwrite');
   const bookmarkStore = transaction.objectStore(STAGED_BOOKMARKS);
   const categoryStore = transaction.objectStore(STAGED_CATEGORIES);
@@ -382,6 +436,17 @@ export async function stageSnapshotPart({ bookmarks = [], categories = [], creat
   categories.forEach((record) => categoryStore.put(record));
   creators.forEach((record) => creatorStore.put(record));
   imageAssets.forEach((record) => imageStore.put(record));
+  if (clickCounts && typeof clickCounts === 'object') {
+    const existing = await requestToPromise(transaction.objectStore(META).get('stagedClickCounts'));
+    const merged = { ...(existing?.value || {}) };
+    Object.entries(clickCounts).forEach(([id, payload]) => {
+      merged[id] = {
+        clickCounts: mergeClickCounts(merged[id]?.clickCounts, payload?.clickCounts),
+        lastClickedAt: Math.max(merged[id]?.lastClickedAt || 0, payload?.lastClickedAt || 0)
+      };
+    });
+    transaction.objectStore(META).put({ key: 'stagedClickCounts', value: merged });
+  }
   await transactionDone(transaction);
 }
 
@@ -409,10 +474,31 @@ function copyStore(transaction, sourceName, destinationName) {
   });
 }
 
+export async function mergeStagedSnapshot(snapshotMeta) {
+  const db = await openDatabase();
+  const stores = [BOOKMARKS, CATEGORIES, CREATORS, IMAGE_ASSETS, META, STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const transaction = db.transaction(stores, 'readwrite');
+  const localLedger = await collectClickLedger(transaction.objectStore(BOOKMARKS));
+  const incomingLedger = (await requestToPromise(transaction.objectStore(META).get('stagedClickCounts')))?.value || {};
+  await Promise.all([
+    copyStore(transaction, STAGED_BOOKMARKS, BOOKMARKS),
+    copyStore(transaction, STAGED_CATEGORIES, CATEGORIES),
+    copyStore(transaction, STAGED_CREATORS, CREATORS),
+    copyStore(transaction, STAGED_IMAGE_ASSETS, IMAGE_ASSETS)
+  ]);
+  await applyLedgerToStore(transaction.objectStore(BOOKMARKS), localLedger, incomingLedger);
+  transaction.objectStore(META).put({ key: 'lastMerge', value: snapshotMeta });
+  transaction.objectStore(META).delete('stagedClickCounts');
+  [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS].forEach((name) => transaction.objectStore(name).clear());
+  await transactionDone(transaction);
+}
+
 export async function activateStagedSnapshot(snapshotMeta) {
   const db = await openDatabase();
   const stores = [BOOKMARKS, CATEGORIES, CREATORS, IMAGE_ASSETS, META, STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
   const transaction = db.transaction(stores, 'readwrite');
+  const localLedger = await collectClickLedger(transaction.objectStore(BOOKMARKS));
+  const incomingLedger = (await requestToPromise(transaction.objectStore(META).get('stagedClickCounts')))?.value || {};
   [BOOKMARKS, CATEGORIES, CREATORS, IMAGE_ASSETS].forEach((name) => transaction.objectStore(name).clear());
   await Promise.all([
     copyStore(transaction, STAGED_BOOKMARKS, BOOKMARKS),
@@ -420,12 +506,15 @@ export async function activateStagedSnapshot(snapshotMeta) {
     copyStore(transaction, STAGED_CREATORS, CREATORS),
     copyStore(transaction, STAGED_IMAGE_ASSETS, IMAGE_ASSETS)
   ]);
+  await applyLedgerToStore(transaction.objectStore(BOOKMARKS), localLedger, incomingLedger);
   transaction.objectStore(META).put({ key: 'lastRestore', value: snapshotMeta });
+  transaction.objectStore(META).delete('stagedClickCounts');
   [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS].forEach((name) => transaction.objectStore(name).clear());
   await transactionDone(transaction);
 }
 
 export async function recordBookmarkOpen(id) {
+  const deviceId = await getDeviceId();
   const db = await openDatabase();
   const transaction = db.transaction(BOOKMARKS, 'readwrite');
   const store = transaction.objectStore(BOOKMARKS);
@@ -434,14 +523,17 @@ export async function recordBookmarkOpen(id) {
     await transactionDone(transaction);
     return null;
   }
+  const clickCounts = normalizeClickCounts(bookmark);
+  clickCounts[deviceId] = (clickCounts[deviceId] || 0) + 1;
   const updated = {
     ...bookmark,
-    clickCount: (bookmark.clickCount || 0) + 1,
+    clickCounts,
+    clickCount: totalClicks(clickCounts),
     lastClickedAt: Date.now()
   };
   store.put(updated);
   await transactionDone(transaction);
-  return { clickCount: updated.clickCount, lastClickedAt: updated.lastClickedAt };
+  return { clickCount: updated.clickCount, lastClickedAt: updated.lastClickedAt, clickCounts: updated.clickCounts };
 }
 
 export async function deleteBookmark(id) {
