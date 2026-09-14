@@ -1,7 +1,9 @@
 const objectUrls = new Set();
 const slideshows = [];
 let slideshowTimer;
-let slideshowObserver;
+let thumbnailObserver;
+let displayObserver;
+let imageBlobLoader;
 export const ASPECT_RATIOS = {
   '3:2': '3 / 2',
   '2:3': '3 / 2',
@@ -9,15 +11,85 @@ export const ASPECT_RATIOS = {
   '1:1': '1 / 1',
   '16:9': '16 / 9'
 };
+export const HOME_ROW_INITIAL = 8;
+export const HOME_ROW_BATCH = 8;
+
+export function nextRowCount(shown, total, batch = HOME_ROW_BATCH) {
+  if (shown >= total) return shown;
+  return Math.min(total, shown + batch);
+}
 
 function clearObjectUrls() {
   clearInterval(slideshowTimer);
   slideshowTimer = undefined;
-  slideshowObserver?.disconnect();
-  slideshowObserver = undefined;
+  thumbnailObserver?.disconnect();
+  displayObserver?.disconnect();
+  thumbnailObserver = undefined;
+  displayObserver = undefined;
   slideshows.length = 0;
   objectUrls.forEach((url) => URL.revokeObjectURL(url));
   objectUrls.clear();
+}
+
+export function setImageBlobLoader(loader) {
+  imageBlobLoader = loader;
+}
+
+function rememberUrl(url) {
+  if (url) objectUrls.add(url);
+  return url;
+}
+
+function forgetUrl(url) {
+  if (!url || !objectUrls.has(url)) return;
+  objectUrls.delete(url);
+  URL.revokeObjectURL(url);
+}
+
+async function loadStoredImage(image) {
+  if (!imageBlobLoader || image.dataset.imageLoading === 'true' || image.dataset.thumbUrl || !image.dataset.imageRef) return;
+  image.dataset.imageLoading = 'true';
+  const reference = image.dataset.imageRef;
+  try {
+    const thumbnail = await imageBlobLoader(reference, 'thumbnail');
+    if (!(thumbnail instanceof Blob)) throw new Error('图片不存在');
+    const thumbnailUrl = rememberUrl(URL.createObjectURL(thumbnail));
+    image.dataset.thumbUrl = thumbnailUrl;
+    image.src = thumbnailUrl;
+  } catch {
+    image.dispatchEvent(new Event('error'));
+  } finally {
+    delete image.dataset.imageLoading;
+  }
+}
+
+async function upgradeToDisplay(image) {
+  if (!imageBlobLoader || image.dataset.displayUrl || image.dataset.displayLoading === 'true') return;
+  const reference = image.dataset.imageRef;
+  if (!reference || reference.startsWith('legacy:')) return;
+  if (image.parentElement?.classList.contains('has-slides') && !image.classList.contains('is-active')) return;
+  image.dataset.displayLoading = 'true';
+  try {
+    const display = await imageBlobLoader(reference, 'display');
+    if (!(display instanceof Blob) || !image.isConnected) return;
+    const displayUrl = rememberUrl(URL.createObjectURL(display));
+    image.dataset.displayUrl = displayUrl;
+    const preloader = new Image();
+    preloader.onload = () => { if (image.dataset.displayUrl === displayUrl) image.src = displayUrl; };
+    preloader.src = displayUrl;
+  } catch {
+    // Keep the thumbnail if the display image cannot be read.
+  } finally {
+    delete image.dataset.displayLoading;
+  }
+}
+
+function downgradeToThumbnail(image) {
+  const displayUrl = image.dataset.displayUrl;
+  if (!displayUrl) return;
+  if (image.dataset.thumbUrl) image.src = image.dataset.thumbUrl;
+  delete image.dataset.displayUrl;
+  forgetUrl(displayUrl);
 }
 
 function loadDeferredSlides(frame) {
@@ -26,21 +98,32 @@ function loadDeferredSlides(frame) {
     image.src = image.dataset.slideSrc;
     delete image.dataset.slideSrc;
   });
+  frame.querySelectorAll('img[data-image-ref]').forEach((image) => loadStoredImage(image));
+}
+
+function upgradeVisibleDisplays(frame) {
+  frame.querySelectorAll('img[data-image-ref]').forEach((image) => upgradeToDisplay(image));
 }
 
 function observeDeferredSlides(frame) {
   if (!('IntersectionObserver' in window)) {
     loadDeferredSlides(frame);
+    upgradeVisibleDisplays(frame);
     return;
   }
-  slideshowObserver ||= new IntersectionObserver((entries) => {
+  thumbnailObserver ||= new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
-      if (!entry.isIntersecting) return;
-      loadDeferredSlides(entry.target);
-      slideshowObserver.unobserve(entry.target);
+      if (entry.isIntersecting) loadDeferredSlides(entry.target);
     });
-  }, { rootMargin: '240px 0px' });
-  slideshowObserver.observe(frame);
+  }, { rootMargin: '240px 480px' });
+  displayObserver ||= new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) upgradeVisibleDisplays(entry.target);
+      else entry.target.querySelectorAll('img[data-display-url]').forEach(downgradeToThumbnail);
+    });
+  }, { rootMargin: '0px 80px', threshold: 0.2 });
+  thumbnailObserver.observe(frame);
+  displayObserver.observe(frame);
 }
 
 export function getBookmarkImages(bookmark) {
@@ -48,7 +131,7 @@ export function getBookmarkImages(bookmark) {
 }
 
 function startSlideshows() {
-  if (!slideshows.length || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (slideshowTimer || !slideshows.length || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   slideshowTimer = setInterval(() => {
     if (document.hidden) return;
     slideshows.forEach((slideshow) => {
@@ -67,8 +150,11 @@ function startSlideshows() {
 
 function setActiveSlide(slideshow, index) {
   if (!slideshow.loaded[index] || slideshow.failed[index]) return;
-  slideshow.images[slideshow.index]?.classList.remove('is-active');
+  const previous = slideshow.images[slideshow.index];
   slideshow.images[index].classList.add('is-active');
+  previous?.classList.remove('is-active');
+  if (previous && previous !== slideshow.images[index]) downgradeToThumbnail(previous);
+  upgradeToDisplay(slideshow.images[index]);
   slideshow.index = index;
   slideshow.counter.textContent = `${index + 1}/${slideshow.images.length}`;
 }
@@ -198,11 +284,13 @@ function posterCard(bookmark, categoryName) {
   const frame = element('div', 'poster-frame');
   frame.style.setProperty('--poster-ratio', ASPECT_RATIOS[bookmark.aspectRatio] || ASPECT_RATIOS['3:2']);
   const blobs = getBookmarkImages(bookmark);
+  const storedReferences = bookmark.imageIds?.length
+    ? bookmark.imageIds
+    : Array.from({ length: bookmark.legacyImageCount || 0 }, (_, index) => `legacy:${bookmark.id}:${index}`);
+  const sources = blobs.length ? blobs : storedReferences;
   let slideshow;
-  const images = blobs.map((blob, index) => {
+  const images = sources.map((source, index) => {
     const image = new Image();
-    const imageUrl = URL.createObjectURL(blob);
-    objectUrls.add(imageUrl);
     image.alt = index === 0 ? `${bookmark.title} 图片` : '';
     image.loading = 'lazy';
     image.decoding = 'async';
@@ -212,11 +300,17 @@ function posterCard(bookmark, categoryName) {
       markImageFailed(image, slideshow, index);
     }, { once: true });
     if (index > 0) image.setAttribute('aria-hidden', 'true');
-    if (index === 0) {
-      image.src = imageUrl;
-      if (image.complete && image.naturalWidth > 0) markImageLoaded(image, slideshow, index);
+    if (source instanceof Blob) {
+      const imageUrl = URL.createObjectURL(source);
+      objectUrls.add(imageUrl);
+      if (index === 0) {
+        image.src = imageUrl;
+        if (image.complete && image.naturalWidth > 0) markImageLoaded(image, slideshow, index);
+      } else {
+        image.dataset.slideSrc = imageUrl;
+      }
     } else {
-      image.dataset.slideSrc = imageUrl;
+      image.dataset.imageRef = source;
     }
     return image;
   });
@@ -233,6 +327,7 @@ function posterCard(bookmark, categoryName) {
     observeDeferredSlides(frame);
   } else {
     frame.append(...images);
+    if (storedReferences.length) observeDeferredSlides(frame);
   }
   link.append(frame);
 
@@ -249,12 +344,47 @@ function posterCard(bookmark, categoryName) {
   return card;
 }
 
-function section(title, bookmarks, categoryMap, isGrid = false, gridClass = '') {
+function appendPosterCards(collection, bookmarks, categoryMap) {
+  bookmarks.forEach((bookmark) => collection.append(posterCard(bookmark, categoryMap.get(bookmark.category) || '未分类')));
+}
+
+function bindWindowedRow(collection, bookmarks, categoryMap) {
+  let shown = 0;
+  const append = (count) => {
+    const slice = bookmarks.slice(shown, shown + count);
+    appendPosterCards(collection, slice, categoryMap);
+    shown += slice.length;
+    startSlideshows();
+    return slice.length;
+  };
+  append(HOME_ROW_INITIAL);
+  if (shown >= bookmarks.length) return;
+  const fillVisible = () => {
+    while (shown < bookmarks.length && collection.scrollWidth <= collection.clientWidth + 80) {
+      const before = collection.scrollWidth;
+      if (!append(HOME_ROW_BATCH) || collection.scrollWidth === before) break;
+    }
+  };
+  const onScroll = () => {
+    if (shown >= bookmarks.length) {
+      collection.removeEventListener('scroll', onScroll);
+      return;
+    }
+    if (collection.scrollWidth - collection.scrollLeft - collection.clientWidth > 560) return;
+    append(HOME_ROW_BATCH);
+    if (shown >= bookmarks.length) collection.removeEventListener('scroll', onScroll);
+  };
+  collection.addEventListener('scroll', onScroll, { passive: true });
+  requestAnimationFrame(fillVisible);
+}
+
+function section(title, bookmarks, categoryMap, isGrid = false, gridClass = '', options = {}) {
   const wrapper = element('section', 'section');
   const heading = element('div', 'section-head');
   heading.append(element('h2', '', title), element('p', '', `${bookmarks.length} ITEMS`));
   const collection = element('div', `${isGrid ? 'poster-grid' : 'poster-row'}${gridClass ? ` ${gridClass}` : ''}`);
-  bookmarks.forEach((bookmark) => collection.append(posterCard(bookmark, categoryMap.get(bookmark.category) || '未分类')));
+  if (!isGrid && options.windowed) bindWindowedRow(collection, bookmarks, categoryMap);
+  else appendPosterCards(collection, bookmarks, categoryMap);
   wrapper.append(heading, collection);
   return wrapper;
 }
@@ -316,7 +446,7 @@ function renderCreators(container, creators, bookmarks, normalizedQuery) {
   container.append(grid);
 }
 
-function renderCreatorDetail(container, creator, bookmarks, categoryMap, normalizedQuery, sortMode) {
+function renderCreatorDetail(container, creator, bookmarks, categoryMap, normalizedQuery, sortMode, renderLimit = 60) {
   const hero = element('section', 'creator-profile');
   const copy = element('div', 'creator-profile-copy');
   const back = element('button', 'creator-back', '‹ 全部博主');
@@ -348,7 +478,16 @@ function renderCreatorDetail(container, creator, bookmarks, categoryMap, normali
     const categoryName = categoryMap.get(bookmark.category) || '';
     return !normalizedQuery || `${bookmark.title} ${categoryName}`.toLocaleLowerCase('zh-CN').includes(normalizedQuery);
   }), sortMode);
-  if (works.length) container.append(section('全部作品', works, categoryMap, true, categoryGridClass()));
+  if (works.length) {
+    const displayed = works.slice(0, renderLimit);
+    container.append(section('全部作品', displayed, categoryMap, true, categoryGridClass()));
+    if (displayed.length < works.length) {
+      const more = element('button', 'button button-quiet load-more-button', `继续显示（剩余 ${works.length - displayed.length}）`);
+      more.type = 'button';
+      more.dataset.loadMore = 'true';
+      container.append(more);
+    }
+  }
   else {
     const empty = element('section', 'creator-works-empty');
     empty.append(element('p', '', normalizedQuery ? '没有找到相符的作品。' : '这个博主还没有作品。'));
@@ -421,7 +560,7 @@ export function bookmarkMatchesView(bookmark, activeView, categoryName = '') {
   return bookmark.category === activeView;
 }
 
-export function renderContent(container, bookmarks, categories, creators, activeView, query, sortMode = 'createdAt') {
+export function renderContent(container, bookmarks, categories, creators, activeView, query, sortMode = 'createdAt', renderLimit = 60) {
   clearObjectUrls();
   container.replaceChildren();
   const categoryMap = new Map(categories.map((category) => [category.id, category.name]));
@@ -432,7 +571,7 @@ export function renderContent(container, bookmarks, categories, creators, active
   }
   if (activeView.startsWith('creator:')) {
     const creator = creators.find((item) => item.id === activeView.slice(8));
-    if (creator) renderCreatorDetail(container, creator, bookmarks, categoryMap, normalizedQuery, sortMode);
+    if (creator) renderCreatorDetail(container, creator, bookmarks, categoryMap, normalizedQuery, sortMode, renderLimit);
     else container.append(creatorEmptyState());
     return;
   }
@@ -451,17 +590,24 @@ export function renderContent(container, bookmarks, categories, creators, active
   if (normalizedQuery || activeView === 'all' || !['home', 'all'].includes(activeView)) {
     const title = normalizedQuery ? '搜索结果' : activeView === 'all' ? '全部收藏' : categoryMap.get(activeView);
     const gridClass = viewGridClass(activeView);
-    container.append(section(title, visible, categoryMap, true, gridClass));
+    const displayed = visible.slice(0, renderLimit);
+    container.append(section(title, displayed, categoryMap, true, gridClass));
+    if (displayed.length < visible.length) {
+      const more = element('button', 'button button-quiet load-more-button', `继续显示（剩余 ${visible.length - displayed.length}）`);
+      more.type = 'button';
+      more.dataset.loadMore = 'true';
+      container.append(more);
+    }
     startSlideshows();
     return;
   }
 
   const primaryItems = sortMode === 'clickCount' ? visible : visible.slice(0, 12);
-  container.append(section(sortMode === 'clickCount' ? '最常打开' : '最近添加', primaryItems, categoryMap));
+  container.append(section(sortMode === 'clickCount' ? '最常打开' : '最近添加', primaryItems, categoryMap, false, '', { windowed: primaryItems.length > HOME_ROW_INITIAL }));
   categories.forEach((category) => {
     if (isCreatorWorksCategory(category)) return;
     const items = visible.filter((bookmark) => bookmark.category === category.id);
-    if (items.length) container.append(section(category.name, items, categoryMap));
+    if (items.length) container.append(section(category.name, items, categoryMap, false, '', { windowed: items.length > HOME_ROW_INITIAL }));
   });
   startSlideshows();
 }

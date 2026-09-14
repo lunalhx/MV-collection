@@ -1,8 +1,14 @@
 const DB_NAME = 'poster-bookmarks';
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 const BOOKMARKS = 'bookmarks';
 const CATEGORIES = 'categories';
 const CREATORS = 'creators';
+const IMAGE_ASSETS = 'image-assets';
+const META = 'meta';
+const STAGED_BOOKMARKS = 'staged-bookmarks';
+const STAGED_CATEGORIES = 'staged-categories';
+const STAGED_CREATORS = 'staged-creators';
+const STAGED_IMAGE_ASSETS = 'staged-image-assets';
 
 export const DEFAULT_CATEGORIES = [
   { id: 'movies', name: '电影', createdAt: 1, sortOrder: 0 },
@@ -50,6 +56,16 @@ export function openDatabase() {
         const creatorStore = db.createObjectStore(CREATORS, { keyPath: 'id' });
         creatorStore.createIndex('createdAt', 'createdAt');
       }
+      if (!db.objectStoreNames.contains(IMAGE_ASSETS)) {
+        const imageStore = db.createObjectStore(IMAGE_ASSETS, { keyPath: 'id' });
+        imageStore.createIndex('groupId', 'groupId');
+        imageStore.createIndex('hash', 'hash');
+      }
+      if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'key' });
+      if (!db.objectStoreNames.contains(STAGED_BOOKMARKS)) db.createObjectStore(STAGED_BOOKMARKS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STAGED_CATEGORIES)) db.createObjectStore(STAGED_CATEGORIES, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STAGED_CREATORS)) db.createObjectStore(STAGED_CREATORS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STAGED_IMAGE_ASSETS)) db.createObjectStore(STAGED_IMAGE_ASSETS, { keyPath: 'id' });
     };
 
     request.onsuccess = () => {
@@ -72,8 +88,32 @@ async function getAll(storeName) {
   return result;
 }
 
+function lightweightBookmark(bookmark) {
+  const legacyImages = [bookmark.image, ...(bookmark.gallery || [])].filter((image) => image instanceof Blob);
+  const copy = { ...bookmark, image: null, gallery: [] };
+  copy.imageIds = Array.isArray(bookmark.imageIds) ? bookmark.imageIds : [];
+  copy.legacyImageCount = copy.imageIds.length ? 0 : legacyImages.length;
+  copy.imageCount = copy.imageIds.length || copy.legacyImageCount;
+  return copy;
+}
+
 export async function getBookmarks() {
-  return (await getAll(BOOKMARKS)).sort((a, b) => b.createdAt - a.createdAt);
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOKMARKS, 'readonly');
+  const store = transaction.objectStore(BOOKMARKS);
+  const bookmarks = [];
+  await new Promise((resolve, reject) => {
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      bookmarks.push(lightweightBookmark(cursor.value));
+      cursor.continue();
+    };
+  });
+  await transactionDone(transaction);
+  return bookmarks.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function getCategories() {
@@ -104,6 +144,287 @@ export async function saveBookmark(bookmark) {
   return bookmark;
 }
 
+export async function getBookmarkImageBlobs(bookmarkOrId, rendition = 'display') {
+  const bookmark = typeof bookmarkOrId === 'string' ? await getBookmark(bookmarkOrId) : bookmarkOrId;
+  if (!bookmark) return [];
+  if (!Array.isArray(bookmark.imageIds) || !bookmark.imageIds.length) {
+    return [bookmark.image, ...(bookmark.gallery || [])].filter((image) => image instanceof Blob);
+  }
+  const db = await openDatabase();
+  const transaction = db.transaction(IMAGE_ASSETS, 'readonly');
+  const store = transaction.objectStore(IMAGE_ASSETS);
+  const requests = bookmark.imageIds.map((groupId) => ({
+    preferred: store.get(`${groupId}:${rendition}`),
+    display: rendition === 'display' ? null : store.get(`${groupId}:display`)
+  }));
+  const blobs = await Promise.all(requests.map(async ({ preferred, display }) => {
+    const asset = await requestToPromise(preferred);
+    const fallback = display ? await requestToPromise(display) : null;
+    return asset?.blob instanceof Blob ? asset.blob : fallback?.blob instanceof Blob ? fallback.blob : null;
+  }));
+  await transactionDone(transaction);
+  return blobs.filter(Boolean);
+}
+
+export async function getImageBlob(reference, rendition = 'display') {
+  if (reference.startsWith('legacy:')) {
+    const [, bookmarkId, rawIndex] = reference.split(':');
+    const bookmark = await getBookmark(bookmarkId);
+    return [bookmark?.image, ...(bookmark?.gallery || [])].filter((image) => image instanceof Blob)[Number(rawIndex)] || null;
+  }
+  const db = await openDatabase();
+  const transaction = db.transaction(IMAGE_ASSETS, 'readonly');
+  const store = transaction.objectStore(IMAGE_ASSETS);
+  const asset = await requestToPromise(store.get(`${reference}:${rendition}`));
+  const fallback = asset || (rendition === 'display' ? null : await requestToPromise(store.get(`${reference}:display`)));
+  await transactionDone(transaction);
+  return fallback?.blob instanceof Blob ? fallback.blob : null;
+}
+
+export async function getImageGroup(groupId) {
+  const db = await openDatabase();
+  const transaction = db.transaction(IMAGE_ASSETS, 'readonly');
+  const store = transaction.objectStore(IMAGE_ASSETS);
+  const displayRequest = store.get(`${groupId}:display`);
+  const thumbnailRequest = store.get(`${groupId}:thumbnail`);
+  const [display, thumbnail] = await Promise.all([requestToPromise(displayRequest), requestToPromise(thumbnailRequest)]);
+  await transactionDone(transaction);
+  return display?.blob instanceof Blob ? { groupId, display, thumbnail: thumbnail || display } : null;
+}
+
+export async function savePreparedImage(prepared) {
+  const db = await openDatabase();
+  const transaction = db.transaction(IMAGE_ASSETS, 'readwrite');
+  const store = transaction.objectStore(IMAGE_ASSETS);
+  const existing = await requestToPromise(store.index('hash').get(prepared.hash));
+  if (existing?.groupId) {
+    await transactionDone(transaction);
+    return existing.groupId;
+  }
+  const groupId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const now = Date.now();
+  store.put({ id: `${groupId}:display`, groupId, kind: 'display', hash: prepared.hash, blob: prepared.display, width: prepared.width, height: prepared.height, bytes: prepared.display.size, createdAt: now });
+  store.put({ id: `${groupId}:thumbnail`, groupId, kind: 'thumbnail', hash: null, blob: prepared.thumbnail, width: prepared.thumbnailWidth, height: prepared.thumbnailHeight, bytes: prepared.thumbnail.size, createdAt: now });
+  await transactionDone(transaction);
+  return groupId;
+}
+
+export async function verifyImageGroup(groupId) {
+  const group = await getImageGroup(groupId);
+  if (!group?.display?.blob || group.display.blob.size < 24) throw new Error('写入后无法读回显示图');
+  if (!group.thumbnail?.blob || group.thumbnail.blob.size < 16) throw new Error('写入后无法读回缩略图');
+  return group;
+}
+
+export async function cleanupImageGroups(groupIds = []) {
+  const candidates = [...new Set(groupIds.filter(Boolean))];
+  if (!candidates.length) return;
+  const db = await openDatabase();
+  const readTransaction = db.transaction(BOOKMARKS, 'readonly');
+  const referenced = new Set();
+  await new Promise((resolve, reject) => {
+    const request = readTransaction.objectStore(BOOKMARKS).openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      (cursor.value.imageIds || []).forEach((groupId) => referenced.add(groupId));
+      cursor.continue();
+    };
+  });
+  await transactionDone(readTransaction);
+  const transaction = db.transaction(IMAGE_ASSETS, 'readwrite');
+  const store = transaction.objectStore(IMAGE_ASSETS);
+  candidates.filter((groupId) => !referenced.has(groupId)).forEach((groupId) => {
+    store.delete(`${groupId}:display`);
+    store.delete(`${groupId}:thumbnail`);
+  });
+  await transactionDone(transaction);
+}
+
+export async function migrateLegacyBookmark(id, imageIds) {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOKMARKS, 'readwrite');
+  const store = transaction.objectStore(BOOKMARKS);
+  const bookmark = await requestToPromise(store.get(id));
+  if (bookmark && (!bookmark.imageIds || !bookmark.imageIds.length)) {
+    store.put({ ...bookmark, image: null, gallery: [], imageIds, assetVersion: 1, updatedAt: bookmark.updatedAt || Date.now() });
+  }
+  await transactionDone(transaction);
+}
+
+export async function getLegacyBookmark() {
+  const samples = await getLegacySamples(1);
+  return samples[0] || null;
+}
+
+export async function getLegacySamples(limit = 12) {
+  const db = await openDatabase();
+  const transaction = db.transaction(BOOKMARKS, 'readonly');
+  const store = transaction.objectStore(BOOKMARKS);
+  const samples = [];
+  await new Promise((resolve, reject) => {
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || samples.length >= limit) return resolve();
+      const value = cursor.value;
+      const hasLegacy = !value.imageIds?.length && [value.image, ...(value.gallery || [])].some((image) => image instanceof Blob);
+      if (hasLegacy) samples.push(value);
+      cursor.continue();
+    };
+  });
+  await transactionDone(transaction);
+  return samples;
+}
+
+function metadataBytes(record) {
+  const { image, gallery, avatar, blob, ...rest } = record;
+  try {
+    return JSON.stringify(rest).length;
+  } catch {
+    return 256;
+  }
+}
+
+export async function getAssetStats() {
+  const db = await openDatabase();
+  const transaction = db.transaction([BOOKMARKS, IMAGE_ASSETS, CREATORS, CATEGORIES], 'readonly');
+  const bookmarkStatsPromise = new Promise((resolve, reject) => {
+    let legacyCount = 0;
+    let legacyBytes = 0;
+    let textBytes = 0;
+    const request = transaction.objectStore(BOOKMARKS).openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve({ legacyCount, legacyBytes, textBytes });
+      const bookmark = cursor.value;
+      textBytes += metadataBytes(bookmark);
+      const legacyImages = !bookmark.imageIds?.length ? [bookmark.image, ...(bookmark.gallery || [])].filter((image) => image instanceof Blob) : [];
+      if (legacyImages.length) {
+        legacyCount += 1;
+        legacyBytes += legacyImages.reduce((total, image) => total + image.size, 0);
+      }
+      cursor.continue();
+    };
+  });
+  const assetBytesPromise = new Promise((resolve, reject) => {
+    const bytes = { display: 0, thumbnail: 0 };
+    const request = transaction.objectStore(IMAGE_ASSETS).openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve(bytes);
+      const asset = cursor.value;
+      const size = Number.isFinite(asset.bytes) ? asset.bytes : asset.blob instanceof Blob ? asset.blob.size : 0;
+      if (asset.kind in bytes) bytes[asset.kind] += size;
+      cursor.continue();
+    };
+  });
+  const extraTextPromise = Promise.all([
+    requestToPromise(transaction.objectStore(CATEGORIES).getAll()),
+    requestToPromise(transaction.objectStore(CREATORS).getAll())
+  ]).then(([categories, creators]) => categories.reduce((total, category) => total + metadataBytes(category), 0)
+    + creators.reduce((total, creator) => total + metadataBytes(creator) + (creator.avatar instanceof Blob ? creator.avatar.size : 0), 0));
+  const [bookmarkCount, assetCount, bookmarkStats, assetBytes, extraText] = await Promise.all([
+    requestToPromise(transaction.objectStore(BOOKMARKS).count()),
+    requestToPromise(transaction.objectStore(IMAGE_ASSETS).count()),
+    bookmarkStatsPromise,
+    assetBytesPromise,
+    extraTextPromise
+  ]);
+  await transactionDone(transaction);
+  return {
+    bookmarkCount,
+    imageCount: Math.floor(assetCount / 2),
+    legacyCount: bookmarkStats.legacyCount,
+    legacyBytes: bookmarkStats.legacyBytes,
+    displayBytes: assetBytes.display,
+    thumbnailBytes: assetBytes.thumbnail,
+    textBytes: bookmarkStats.textBytes + extraText
+  };
+}
+
+export async function getMeta(key) {
+  const db = await openDatabase();
+  const transaction = db.transaction(META, 'readonly');
+  const record = await requestToPromise(transaction.objectStore(META).get(key));
+  await transactionDone(transaction);
+  return record?.value;
+}
+
+export async function setMeta(key, value) {
+  const db = await openDatabase();
+  const transaction = db.transaction(META, 'readwrite');
+  transaction.objectStore(META).put({ key, value });
+  await transactionDone(transaction);
+}
+
+export async function clearStagedSnapshot() {
+  const db = await openDatabase();
+  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const transaction = db.transaction(stores, 'readwrite');
+  stores.forEach((name) => transaction.objectStore(name).clear());
+  await transactionDone(transaction);
+}
+
+export async function stageSnapshotPart({ bookmarks = [], categories = [], creators = [], imageAssets = [] }) {
+  const db = await openDatabase();
+  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const transaction = db.transaction(stores, 'readwrite');
+  const bookmarkStore = transaction.objectStore(STAGED_BOOKMARKS);
+  const categoryStore = transaction.objectStore(STAGED_CATEGORIES);
+  const creatorStore = transaction.objectStore(STAGED_CREATORS);
+  const imageStore = transaction.objectStore(STAGED_IMAGE_ASSETS);
+  bookmarks.forEach((record) => bookmarkStore.put(record));
+  categories.forEach((record) => categoryStore.put(record));
+  creators.forEach((record) => creatorStore.put(record));
+  imageAssets.forEach((record) => imageStore.put(record));
+  await transactionDone(transaction);
+}
+
+export async function getStagedSnapshotStats() {
+  const db = await openDatabase();
+  const stores = [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const transaction = db.transaction(stores, 'readonly');
+  const [bookmarkCount, categoryCount, creatorCount, assetCount] = await Promise.all(stores.map((name) => requestToPromise(transaction.objectStore(name).count())));
+  await transactionDone(transaction);
+  return { bookmarkCount, categoryCount, creatorCount, imageCount: Math.floor(assetCount / 2) };
+}
+
+function copyStore(transaction, sourceName, destinationName) {
+  return new Promise((resolve, reject) => {
+    const source = transaction.objectStore(sourceName);
+    const destination = transaction.objectStore(destinationName);
+    const request = source.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      destination.put(cursor.value);
+      cursor.continue();
+    };
+  });
+}
+
+export async function activateStagedSnapshot(snapshotMeta) {
+  const db = await openDatabase();
+  const stores = [BOOKMARKS, CATEGORIES, CREATORS, IMAGE_ASSETS, META, STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS];
+  const transaction = db.transaction(stores, 'readwrite');
+  [BOOKMARKS, CATEGORIES, CREATORS, IMAGE_ASSETS].forEach((name) => transaction.objectStore(name).clear());
+  await Promise.all([
+    copyStore(transaction, STAGED_BOOKMARKS, BOOKMARKS),
+    copyStore(transaction, STAGED_CATEGORIES, CATEGORIES),
+    copyStore(transaction, STAGED_CREATORS, CREATORS),
+    copyStore(transaction, STAGED_IMAGE_ASSETS, IMAGE_ASSETS)
+  ]);
+  transaction.objectStore(META).put({ key: 'lastRestore', value: snapshotMeta });
+  [STAGED_BOOKMARKS, STAGED_CATEGORIES, STAGED_CREATORS, STAGED_IMAGE_ASSETS].forEach((name) => transaction.objectStore(name).clear());
+  await transactionDone(transaction);
+}
+
 export async function recordBookmarkOpen(id) {
   const db = await openDatabase();
   const transaction = db.transaction(BOOKMARKS, 'readwrite');
@@ -126,8 +447,11 @@ export async function recordBookmarkOpen(id) {
 export async function deleteBookmark(id) {
   const db = await openDatabase();
   const transaction = db.transaction(BOOKMARKS, 'readwrite');
-  transaction.objectStore(BOOKMARKS).delete(id);
+  const store = transaction.objectStore(BOOKMARKS);
+  const bookmark = await requestToPromise(store.get(id));
+  store.delete(id);
   await transactionDone(transaction);
+  await cleanupImageGroups(bookmark?.imageIds || []);
 }
 
 export async function saveCreator(creator) {
@@ -143,9 +467,15 @@ export async function deleteCreator(id) {
   const transaction = db.transaction([CREATORS, BOOKMARKS], 'readwrite');
   transaction.objectStore(CREATORS).delete(id);
   const bookmarkStore = transaction.objectStore(BOOKMARKS);
-  const bookmarks = await requestToPromise(bookmarkStore.getAll());
-  bookmarks.filter((bookmark) => bookmark.creatorId === id).forEach((bookmark) => {
-    bookmarkStore.put({ ...bookmark, creatorId: null, updatedAt: Date.now() });
+  await new Promise((resolve, reject) => {
+    const request = bookmarkStore.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      if (cursor.value.creatorId === id) cursor.update({ ...cursor.value, creatorId: null, updatedAt: Date.now() });
+      cursor.continue();
+    };
   });
   await transactionDone(transaction);
 }
@@ -195,10 +525,16 @@ export async function removeCategory(id) {
   const db = await openDatabase();
   const transaction = db.transaction([CATEGORIES, BOOKMARKS], 'readwrite');
   transaction.objectStore(CATEGORIES).delete(id);
-  const bookmarks = await requestToPromise(transaction.objectStore(BOOKMARKS).getAll());
   const bookmarkStore = transaction.objectStore(BOOKMARKS);
-  bookmarks.filter((bookmark) => bookmark.category === id).forEach((bookmark) => {
-    bookmarkStore.put({ ...bookmark, category: 'uncategorized', updatedAt: Date.now() });
+  await new Promise((resolve, reject) => {
+    const request = bookmarkStore.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return resolve();
+      if (cursor.value.category === id) cursor.update({ ...cursor.value, category: 'uncategorized', updatedAt: Date.now() });
+      cursor.continue();
+    };
   });
   await transactionDone(transaction);
 }

@@ -1,11 +1,22 @@
 import {
   deleteBookmark,
   deleteCreator,
+  cleanupImageGroups,
+  activateStagedSnapshot,
+  clearStagedSnapshot,
+  getAssetStats,
   getBookmark,
+  getBookmarkImageBlobs,
   getBookmarks,
   getCategories,
   getCreators,
-  importRecords,
+  getImageBlob,
+  getImageGroup,
+  getLegacyBookmark,
+  getLegacySamples,
+  getMeta,
+  getStagedSnapshotStats,
+  migrateLegacyBookmark,
   openDatabase,
   recordBookmarkOpen,
   removeCategory,
@@ -13,13 +24,17 @@ import {
   saveBookmark,
   saveCategory,
   saveCategoryOrder,
-  saveCreator
-} from './db.js?v=20260913-2';
-import { createBackup, downloadBackup, parseBackup } from './backup.js?v=20260913-2';
+  saveCreator,
+  savePreparedImage,
+  stageSnapshotPart,
+  setMeta,
+  verifyImageGroup
+} from './db.js?v=20260914-2';
+import { inspectBackupFiles, parseBackup, parseBackupPart, parseDataPart, unpackImagePart, exportVolumeBackup } from './backup.js?v=20260914-3';
+import { IMAGE_POLICY, prepareImage } from './media.js?v=20260914-2';
 import {
   ASPECT_RATIOS,
   categoryIconKey,
-  getBookmarkImages,
   isCreatorWorksCategory,
   positionMenu,
   renderCategoryManager,
@@ -28,8 +43,9 @@ import {
   renderCreatorOptions,
   renderNavigation,
   navigationIcon,
+  setImageBlobLoader,
   sortBookmarks
-} from './ui.js?v=20260914-2';
+} from './ui.js?v=20260914-4';
 
 const dom = {
   content: document.querySelector('#content'),
@@ -82,6 +98,20 @@ const dom = {
   newCategoryInput: document.querySelector('#newCategoryInput'),
   exportButton: document.querySelector('#exportButton'),
   importInput: document.querySelector('#importInput'),
+  backupProgress: document.querySelector('#backupProgress'),
+  storageMeterBar: document.querySelector('#storageMeterBar'),
+  storageSummary: document.querySelector('#storageSummary'),
+  persistenceSummary: document.querySelector('#persistenceSummary'),
+  migrationStatus: document.querySelector('#migrationStatus'),
+  persistStorageButton: document.querySelector('#persistStorageButton'),
+  migrateImagesButton: document.querySelector('#migrateImagesButton'),
+  storageBreakdown: document.querySelector('#storageBreakdown'),
+  backupStatus: document.querySelector('#backupStatus'),
+  qualityPreview: document.querySelector('#qualityPreview'),
+  qualityPreviewGrid: document.querySelector('#qualityPreviewGrid'),
+  confirmMigrationButton: document.querySelector('#confirmMigrationButton'),
+  cancelPreviewButton: document.querySelector('#cancelPreviewButton'),
+  losslessInput: document.querySelector('#losslessInput'),
   menu: document.querySelector('#cardMenu'),
   toast: document.querySelector('#toast')
 };
@@ -109,7 +139,9 @@ const state = {
   activeView: viewFromLocation(),
   query: '',
   sortMode: readSortPreference(),
+  renderLimit: 60,
   editingImages: [],
+  editingImageIds: [],
   previewUrl: null,
   editingCreatorAvatar: null,
   creatorPreviewUrl: null
@@ -118,6 +150,7 @@ let categoryOrderSave = Promise.resolve();
 let categoryOrderVersion = 0;
 
 dom.sortSelect.value = state.sortMode;
+setImageBlobLoader(getImageBlob);
 
 function makeId() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -132,6 +165,7 @@ function navigate(view, { replace = false } = {}) {
   history[replace ? 'replaceState' : 'pushState']({ view }, '', hash);
   state.activeView = view;
   state.query = '';
+  state.renderLimit = 60;
   dom.search.value = '';
   render();
   document.querySelector('#mainContent').focus({ preventScroll: true });
@@ -207,35 +241,195 @@ function syncNoImageOption() {
   else dom.fileName.textContent = 'JPG、PNG、WEBP';
 }
 
-function loadImage(blob) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    const url = URL.createObjectURL(blob);
-    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
-    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('无法读取这张图片')); };
-    image.src = url;
-  });
+async function storeImageAssets(blobs, options = {}) {
+  const imageIds = [];
+  for (let index = 0; index < blobs.length; index += 1) {
+    const groupId = await savePreparedImage(await prepareImage(blobs[index], IMAGE_POLICY, options));
+    await verifyImageGroup(groupId);
+    imageIds.push(groupId);
+    if ((index + 1) % 3 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return imageIds;
 }
 
-// Isolated so the size/quality policy can be adjusted without touching form logic.
-async function optimizeImage(file, maxDimension = 1500, quality = 0.9) {
-  const image = await loadImage(file);
-  const largestSide = Math.max(image.naturalWidth, image.naturalHeight);
-  if (largestSide <= maxDimension) return file;
-  const scale = maxDimension / largestSide;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(image.naturalWidth * scale);
-  canvas.height = Math.round(image.naturalHeight * scale);
-  canvas.getContext('2d', { alpha: file.type === 'image/png' }).drawImage(image, 0, 0, canvas.width, canvas.height);
-  const outputType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, outputType, quality));
-  return blob || file;
+function formatBytes(bytes = 0) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 100 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
-async function optimizeImages(files) {
-  const images = [];
-  for (const file of files) images.push(await optimizeImage(file));
-  return images;
+function backupRecordText(record, fallbackDate) {
+  const value = record || fallbackDate;
+  if (!value) return '';
+  const exportedAt = value.exportedAt || value;
+  const source = value.sourceDevice ? ` · 来源 ${value.sourceDevice}` : '';
+  const date = new Date(exportedAt);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.toLocaleString('zh-CN')}${source}`;
+}
+
+async function refreshStorageStatus() {
+  const [estimate, persisted, stats, lastBackup, lastBackupAt, lastRestore] = await Promise.all([
+    navigator.storage?.estimate?.() || {},
+    navigator.storage?.persisted?.() || false,
+    getAssetStats(),
+    getMeta('lastBackup'),
+    getMeta('lastBackupAt'),
+    getMeta('lastRestore')
+  ]);
+  const measured = (stats.textBytes || 0) + (stats.displayBytes || 0) + (stats.thumbnailBytes || 0) + (stats.legacyBytes || 0);
+  const usage = Math.max(estimate.usage || 0, measured);
+  const quota = estimate.quota || 0;
+  const percentage = quota ? Math.min(100, usage / quota * 100) : 0;
+  dom.storageMeterBar.style.width = `${percentage}%`;
+  dom.storageMeterBar.parentElement.classList.toggle('is-warning', percentage >= 70 && percentage < 85);
+  dom.storageMeterBar.parentElement.classList.toggle('is-danger', percentage >= 85);
+  dom.storageSummary.textContent = `资料约 ${formatBytes(measured)} · ${stats.bookmarkCount} 个收藏 · ${stats.imageCount} 组优化图片${quota ? ` · 浏览器估算上限约 ${formatBytes(quota)}` : ''}`;
+  const parts = [
+    `文字 ${formatBytes(stats.textBytes || 0)}`,
+    stats.imageCount ? `显示图 ${formatBytes(stats.displayBytes)}` : null,
+    stats.imageCount ? `缩略图 ${formatBytes(stats.thumbnailBytes)}` : null,
+    stats.legacyCount ? `待优化 PNG ${formatBytes(stats.legacyBytes)}` : null
+  ].filter(Boolean);
+  dom.storageBreakdown.textContent = parts.join(' · ');
+  const capacityWarning = percentage >= 85 ? '存储使用率已超过 85%，请尽快导出并清理。' : percentage >= 70 ? '存储使用率已超过 70%，建议准备新备份。' : '';
+  dom.persistenceSummary.textContent = `${capacityWarning}${capacityWarning ? ' ' : ''}${persisted ? '浏览器已授予持久存储保护。' : '当前为浏览器尽力保存模式，请继续保留硬盘备份。'}`;
+  const backupText = backupRecordText(lastBackup, lastBackupAt);
+  const restoreText = backupRecordText(lastRestore);
+  dom.backupStatus.textContent = backupText ? `最近备份：${backupText}${restoreText ? `。最近恢复：${restoreText}` : ''}` : restoreText ? `最近恢复：${restoreText}` : '还没有记录完整备份。';
+  if (!migrationRunning && (!dom.qualityPreview || dom.qualityPreview.hidden) && !dom.migrationStatus.dataset.locked) {
+    const progress = await getMeta('imageMigrationProgress');
+    dom.migrationStatus.textContent = stats.legacyCount
+      ? (progress?.done ? `旧图片优化可继续，还剩 ${stats.legacyCount} 个收藏。` : `还有 ${stats.legacyCount} 个收藏使用旧版 PNG。`)
+      : '';
+  }
+  dom.persistStorageButton.hidden = persisted || !navigator.storage?.persist;
+  dom.migrateImagesButton.hidden = stats.legacyCount === 0;
+  dom.migrateImagesButton.textContent = stats.legacyCount ? `优化旧图片（${stats.legacyCount}）` : '旧图片已优化';
+}
+
+async function requestPersistentStorage() {
+  const granted = await navigator.storage?.persist?.();
+  await refreshStorageStatus();
+  toast(granted ? '已获得持久存储保护' : '浏览器暂未授予持久存储，请保持定期备份');
+}
+
+let migrationRunning = false;
+const previewUrls = [];
+
+function revokePreviewUrls() {
+  previewUrls.forEach((url) => URL.revokeObjectURL(url));
+  previewUrls.length = 0;
+}
+
+function previewFigure(blob, caption) {
+  const figure = document.createElement('figure');
+  const image = new Image();
+  const url = URL.createObjectURL(blob);
+  previewUrls.push(url);
+  image.src = url;
+  image.alt = caption;
+  const label = document.createElement('figcaption');
+  label.textContent = caption;
+  figure.append(image, label);
+  return figure;
+}
+
+async function showQualityPreview() {
+  revokePreviewUrls();
+  dom.qualityPreviewGrid.replaceChildren();
+  dom.qualityPreview.hidden = false;
+  dom.migrationStatus.dataset.locked = 'true';
+  dom.migrationStatus.textContent = '正在生成画质对比…';
+  const samples = await getLegacySamples(12);
+  if (!samples.length) {
+    hideQualityPreview();
+    throw new Error('没有找到可对比的旧图片');
+  }
+  for (const bookmark of samples) {
+    const blob = [bookmark.image, ...(bookmark.gallery || [])].find((image) => image instanceof Blob);
+    if (!blob) continue;
+    const [q90, q85] = await Promise.all([
+      prepareImage(blob, IMAGE_POLICY),
+      prepareImage(blob, { ...IMAGE_POLICY, displayQuality: 0.85 })
+    ]);
+    const item = document.createElement('div');
+    item.className = 'quality-preview-item';
+    const title = document.createElement('strong');
+    title.textContent = bookmark.title;
+    const images = document.createElement('div');
+    images.className = 'quality-preview-images';
+    images.append(
+      previewFigure(blob, '原图'),
+      previewFigure(q90.display, 'WebP 0.90'),
+      previewFigure(q85.display, 'WebP 0.85')
+    );
+    item.append(title, images);
+    dom.qualityPreviewGrid.append(item);
+  }
+  dom.migrationStatus.textContent = `已抽出 ${dom.qualityPreviewGrid.children.length} 张样本。确认画质后开始批量优化。`;
+}
+
+function hideQualityPreview() {
+  revokePreviewUrls();
+  if (dom.qualityPreview) {
+    dom.qualityPreview.hidden = true;
+    dom.qualityPreviewGrid.replaceChildren();
+  }
+  delete dom.migrationStatus.dataset.locked;
+}
+
+async function runLegacyMigration() {
+  if (migrationRunning) return;
+  migrationRunning = true;
+  dom.migrateImagesButton.disabled = true;
+  dom.confirmMigrationButton.disabled = true;
+  hideQualityPreview();
+  let migrated = 0;
+  try {
+    let bookmark = await getLegacyBookmark();
+    while (bookmark) {
+      const blobs = [bookmark.image, ...(bookmark.gallery || [])].filter((image) => image instanceof Blob);
+      dom.migrationStatus.dataset.locked = 'true';
+      dom.migrationStatus.textContent = `正在优化“${bookmark.title}”的 ${blobs.length} 张图片…`;
+      const imageIds = await storeImageAssets(blobs);
+      await migrateLegacyBookmark(bookmark.id, imageIds);
+      migrated += 1;
+      await setMeta('imageMigrationProgress', { done: migrated, updatedAt: new Date().toISOString() });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      bookmark = await getLegacyBookmark();
+    }
+    await setMeta('imageMigrationCompletedAt', new Date().toISOString());
+    await setMeta('imageMigrationProgress', { done: migrated, remaining: 0, updatedAt: new Date().toISOString() });
+    delete dom.migrationStatus.dataset.locked;
+    dom.migrationStatus.textContent = `已安全优化 ${migrated} 个旧收藏。`;
+    await refresh();
+    await refreshStorageStatus();
+    toast('旧图片优化完成');
+  } catch (error) {
+    dom.migrationStatus.dataset.locked = 'true';
+    dom.migrationStatus.textContent = `优化已暂停：${error.message || '未知错误'}。已完成的部分会保留，下次可以继续。`;
+  } finally {
+    migrationRunning = false;
+    dom.migrateImagesButton.disabled = false;
+    if (dom.confirmMigrationButton) dom.confirmMigrationButton.disabled = false;
+  }
+}
+
+async function migrateLegacyLibrary() {
+  if (migrationRunning) return;
+  const previewed = await getMeta('imageMigrationPreviewedAt');
+  if (!previewed) {
+    if (!confirm('开始前会先抽出最多 12 张旧图，对比原图、WebP 0.90 和 0.85。\n\n请确认已经保留旧版完整备份，是否继续？')) return;
+    try {
+      await showQualityPreview();
+    } catch (error) {
+      toast(error.message || '无法生成画质对比');
+    }
+    return;
+  }
+  if (!confirm('旧图片会分批转换为高质量 WebP，并在读回校验后移除浏览器中的 PNG 副本。\n\n已完成的部分会保留，关闭页面后可以继续。是否开始？')) return;
+  await runLegacyMigration();
 }
 
 function countsByCategory() {
@@ -283,7 +477,7 @@ function renderCategoryOrdering(includeContent = false) {
   renderCategoryOptions(dom.categoryInput, state.categories, dom.categoryInput.value);
   renderCategoryManager(dom.categoryManager, state.categories, countsByCategory());
   if (includeContent && state.activeView === 'home' && !state.query.trim()) {
-    renderContent(dom.content, state.bookmarks, state.categories, state.creators, state.activeView, state.query, state.sortMode);
+    renderContent(dom.content, state.bookmarks, state.categories, state.creators, state.activeView, state.query, state.sortMode, state.renderLimit);
   }
 }
 
@@ -313,7 +507,7 @@ function render() {
   document.body.classList.toggle('is-creator-detail', isCreatorDetail);
   renderNavigation(dom.categoryNav, state.categories, state.activeView);
   renderMobileCategoryList();
-  renderContent(dom.content, state.bookmarks, state.categories, state.creators, state.activeView, state.query, state.sortMode);
+  renderContent(dom.content, state.bookmarks, state.categories, state.creators, state.activeView, state.query, state.sortMode, state.renderLimit);
   renderCategoryOptions(dom.categoryInput, state.categories, dom.categoryInput.value);
   renderCreatorOptions(dom.creatorInput, state.creators, dom.creatorInput.value);
   renderCategoryManager(dom.categoryManager, state.categories, countsByCategory());
@@ -354,6 +548,8 @@ function resetBookmarkForm(creatorId = '') {
   dom.formError.textContent = '';
   dom.fileName.textContent = 'JPG、PNG、WEBP';
   state.editingImages = [];
+  state.editingImageIds = [];
+  if (dom.losslessInput) dom.losslessInput.checked = false;
   setPreview(null);
   dom.aspectRatioInput.selectedIndex = 0;
   dom.aspectRatioInput.value = '3:2';
@@ -381,7 +577,8 @@ async function showEditDialog(id, replaceImage = false) {
   renderCreatorOptions(dom.creatorInput, state.creators, bookmark.creatorId || '');
   dom.aspectRatioInput.value = ['3:2', '3:4'].includes(bookmark.aspectRatio) ? bookmark.aspectRatio : '3:2';
   updatePreviewRatio();
-  state.editingImages = getBookmarkImages(bookmark);
+  state.editingImageIds = bookmark.imageIds || [];
+  state.editingImages = await getBookmarkImageBlobs(bookmark);
   setPreview(state.editingImages[0]);
   dom.noImageInput.checked = bookmark.category === 'websites' && state.editingImages.length === 0;
   syncNoImageOption();
@@ -398,22 +595,27 @@ async function saveForm(event) {
     const existing = dom.bookmarkId.value ? await getBookmark(dom.bookmarkId.value) : null;
     const withoutImage = dom.categoryInput.value === 'websites' && dom.noImageInput.checked;
     const selectedFiles = [...dom.imageInput.files];
-    const images = withoutImage ? [] : (selectedFiles.length ? await optimizeImages(selectedFiles) : state.editingImages);
-    if (!images.length && !withoutImage) throw new Error('请至少选择一张图片；网站分类可以选择“无需图片”');
+    let imageIds = withoutImage ? [] : state.editingImageIds;
+    if (!withoutImage && selectedFiles.length) imageIds = await storeImageAssets(selectedFiles, { lossless: dom.losslessInput?.checked, name: selectedFiles[0].name });
+    else if (!withoutImage && !imageIds.length && state.editingImages.length) imageIds = await storeImageAssets(state.editingImages);
+    if (!imageIds.length && !withoutImage) throw new Error('请至少选择一张图片；网站分类可以选择“无需图片”');
     const now = Date.now();
     await saveBookmark({
       ...(existing || {}),
       id: existing?.id || makeId(),
       title: dom.titleInput.value.trim(),
       url: safeUrl(dom.urlInput.value.trim()),
-      image: images[0] || null,
-      gallery: images.slice(1),
+      image: null,
+      gallery: [],
+      imageIds,
+      assetVersion: 1,
       category: dom.categoryInput.value || 'uncategorized',
       creatorId: dom.creatorInput.value || null,
       aspectRatio: dom.aspectRatioInput.value || '3:2',
       createdAt: existing?.createdAt || now,
       updatedAt: now
     });
+    if (existing?.imageIds?.length && existing.imageIds.some((id) => !imageIds.includes(id))) await cleanupImageGroups(existing.imageIds);
     closeDialog(dom.bookmarkDialog);
     await refresh();
     toast(existing ? '收藏已更新' : '已加入收藏');
@@ -458,7 +660,9 @@ async function saveCreatorForm(event) {
   try {
     const existing = state.creators.find((creator) => creator.id === dom.creatorId.value);
     const selectedAvatar = dom.creatorAvatarInput.files[0];
-    const avatar = selectedAvatar ? await optimizeImage(selectedAvatar) : state.editingCreatorAvatar;
+    const avatar = selectedAvatar
+      ? (await prepareImage(selectedAvatar, { ...IMAGE_POLICY, displayMaxEdge: 800, displayQuality: 0.88 })).display
+      : state.editingCreatorAvatar;
     const homepageValue = dom.creatorUrlInput.value.trim();
     const now = Date.now();
     const creator = {
@@ -641,6 +845,20 @@ async function updateCategoryIcon(id, icon) {
   toast(icon ? '分类图标已更新' : '已恢复自动匹配图标');
 }
 
+async function loadImageGroups(bookmark) {
+  if (!bookmark.imageIds?.length) return [];
+  const groups = await Promise.all(bookmark.imageIds.map(getImageGroup));
+  return groups.filter(Boolean);
+}
+
+function deviceLabel() {
+  const platform = navigator.platform || '';
+  const agent = navigator.userAgent || '';
+  if (/iPhone/i.test(agent)) return 'iPhone';
+  if (/iPad/i.test(agent) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1)) return 'iPad';
+  return /Mac/i.test(platform) ? 'Mac 主库' : '本地设备';
+}
+
 async function exportCollection() {
   if (!state.bookmarks.length && !state.creators.length) {
     toast('还没有可导出的收藏');
@@ -648,8 +866,24 @@ async function exportCollection() {
   }
   dom.exportButton.disabled = true;
   try {
-    downloadBackup(await createBackup(state.bookmarks, state.categories, state.creators));
-    toast('备份已导出');
+    const stats = await getAssetStats();
+    if (stats.legacyCount) throw new Error(`请先完成 ${stats.legacyCount} 个旧收藏的图片优化，再导出分卷备份`);
+    const manifest = await exportVolumeBackup({
+      bookmarks: state.bookmarks,
+      categories: state.categories,
+      creators: state.creators,
+      loadImageGroups,
+      sourceDevice: deviceLabel(),
+      onProgress: ({ phase, current, total }) => {
+        if (phase === 'complete') dom.backupProgress.textContent = `已导出 ${total} 个图片分卷、数据文件、校验文件和清单。`;
+        else if (phase === 'data') dom.backupProgress.textContent = '正在写入收藏数据…';
+        else dom.backupProgress.textContent = `正在生成第 ${current} 个图片分卷…`;
+      }
+    });
+    await setMeta('lastBackup', { exportedAt: manifest.exportedAt, sourceDevice: manifest.sourceDevice, backupId: manifest.backupId, fileCount: manifest.files.length });
+    await setMeta('lastBackupAt', manifest.exportedAt);
+    await refreshStorageStatus();
+    toast(`备份已导出，共 ${manifest.imagePartCount} 个图片分卷`);
   } catch (error) {
     toast(error.message || '导出失败');
   } finally {
@@ -657,20 +891,118 @@ async function exportCollection() {
   }
 }
 
-async function importCollection(file) {
-  if (!file) return;
+function preparedAssetRecords(prepared, groupId) {
+  const now = Date.now();
+  return [
+    { id: `${groupId}:display`, groupId, kind: 'display', hash: prepared.hash, blob: prepared.display, width: prepared.width, height: prepared.height, createdAt: now },
+    { id: `${groupId}:thumbnail`, groupId, kind: 'thumbnail', hash: null, blob: prepared.thumbnail, width: prepared.thumbnailWidth, height: prepared.thumbnailHeight, createdAt: now }
+  ];
+}
+
+async function stageLegacyRecords(records) {
+  await stageSnapshotPart({ categories: records.categories, creators: records.creators });
+  for (let index = 0; index < records.bookmarks.length; index += 1) {
+    const bookmark = records.bookmarks[index];
+    const blobs = [bookmark.image, ...(bookmark.gallery || [])].filter((image) => image instanceof Blob);
+    const imageIds = [];
+    const imageAssets = [];
+    for (const blob of blobs) {
+      const groupId = makeId();
+      imageIds.push(groupId);
+      imageAssets.push(...preparedAssetRecords(await prepareImage(blob), groupId));
+    }
+    const { image, gallery, ...metadata } = bookmark;
+    await stageSnapshotPart({ bookmarks: [{ ...metadata, imageIds, assetVersion: 1 }], imageAssets });
+    bookmark.image = null;
+    bookmark.gallery = [];
+    dom.backupProgress.textContent = `正在转换旧备份 ${index + 1}/${records.bookmarks.length}…`;
+  }
+}
+
+async function importCollection(files) {
+  const selectedFiles = [...(files || [])];
+  if (!selectedFiles.length) return;
+  let inspected;
   try {
-    const records = await parseBackup(file);
-    records.bookmarks.forEach((bookmark) => { bookmark.url = safeUrl(bookmark.url); });
-    records.creators.forEach((creator) => {
-      if (creator.homepageUrl) creator.homepageUrl = safeUrl(creator.homepageUrl);
-    });
-    await importRecords(records.bookmarks, records.categories, records.creators);
-    await refresh();
-    toast(`已恢复 ${records.bookmarks.length} 个收藏、${records.creators.length} 位博主`);
+    dom.backupProgress.textContent = '正在识别备份格式…';
+    inspected = await inspectBackupFiles(selectedFiles);
   } catch (error) {
-    toast(error.message || '导入失败');
+    if (selectedFiles.length === 1 && !/manifest|checksums|\.mvpart$/i.test(selectedFiles[0].name)) inspected = { kind: 'legacy', files: selectedFiles };
+    else {
+      dom.backupProgress.textContent = `恢复失败：${error.message}`;
+      toast(error.message);
+      dom.importInput.value = '';
+      return;
+    }
+  }
+  const source = inspected.manifest;
+  const details = source
+    ? `来源：${source.sourceDevice || '未知设备'}\n导出时间：${new Date(source.exportedAt).toLocaleString('zh-CN')}\n收藏数量：${source.bookmarkCount}\n图片组数：${source.imageCount ?? '未知'}\n文件数量：${(source.files || []).length || inspected.orderedFiles?.length || selectedFiles.length}`
+    : `旧版单文件：${selectedFiles[0].name}${selectedFiles[0].size > 80 * 1024 * 1024 ? '\n这是超大 JSON，建议只在 Mac 上恢复。' : ''}`;
+  if (!confirm(`完整恢复会使用所选备份替换这台设备上的全部收藏。\n\n${details}\n\n只有所有文件验证并写入成功后才会切换，是否继续？`)) {
+    dom.importInput.value = '';
+    return;
+  }
+  dom.exportButton.disabled = true;
+  try {
+    await clearStagedSnapshot();
+    let restoreMeta;
+    if (inspected.kind === 'legacy') {
+      if (selectedFiles[0].size > 80 * 1024 * 1024 && !confirm('超大旧版 JSON 会占用较多内存。导入期间请勿离开页面，是否继续？')) {
+        await clearStagedSnapshot().catch(() => {});
+        return;
+      }
+      dom.backupProgress.textContent = '正在读取旧版备份…';
+      const records = await parseBackup(selectedFiles[0]);
+      records.bookmarks.forEach((bookmark) => { bookmark.url = safeUrl(bookmark.url); });
+      records.creators.forEach((creator) => { if (creator.homepageUrl) creator.homepageUrl = safeUrl(creator.homepageUrl); });
+      await stageLegacyRecords(records);
+      restoreMeta = { backupId: `legacy-${Date.now()}`, exportedAt: new Date().toISOString(), sourceDevice: '旧版 JSON', bookmarkCount: records.bookmarks.length, categoryCount: records.categories.length, creatorCount: records.creators.length, imageCount: records.bookmarks.reduce((total, bookmark) => total + (bookmark.imageIds?.length || 0), 0) };
+    } else if (inspected.kind === 'v3') {
+      const { manifest, orderedFiles } = inspected;
+      for (let index = 0; index < orderedFiles.length; index += 1) {
+        dom.backupProgress.textContent = `正在暂存第 ${index + 1}/${orderedFiles.length} 个分卷…`;
+        const part = await parseBackupPart(orderedFiles[index], manifest);
+        part.bookmarks.forEach((bookmark) => { bookmark.url = safeUrl(bookmark.url); });
+        part.creators.forEach((creator) => { if (creator.homepageUrl) creator.homepageUrl = safeUrl(creator.homepageUrl); });
+        await stageSnapshotPart(part);
+      }
+      restoreMeta = manifest;
+    } else {
+      const { manifest, dataFiles, imageFiles } = inspected;
+      for (let index = 0; index < dataFiles.length; index += 1) {
+        dom.backupProgress.textContent = `正在暂存数据分卷 ${index + 1}/${dataFiles.length}…`;
+        const part = await parseDataPart(dataFiles[index], manifest);
+        part.bookmarks.forEach((bookmark) => { bookmark.url = safeUrl(bookmark.url); });
+        part.creators.forEach((creator) => { if (creator.homepageUrl) creator.homepageUrl = safeUrl(creator.homepageUrl); });
+        await stageSnapshotPart(part);
+      }
+      for (let index = 0; index < imageFiles.length; index += 1) {
+        dom.backupProgress.textContent = `正在暂存图片分卷 ${index + 1}/${imageFiles.length}…`;
+        const part = await unpackImagePart(imageFiles[index], manifest);
+        await stageSnapshotPart({ imageAssets: part.imageAssets });
+      }
+      restoreMeta = manifest;
+    }
+    const stagedStats = await getStagedSnapshotStats();
+    for (const key of ['bookmarkCount', 'categoryCount', 'creatorCount']) {
+      if (Number.isFinite(restoreMeta[key]) && stagedStats[key] !== restoreMeta[key]) throw new Error(`暂存资料数量校验失败：${key}`);
+    }
+    if (Number.isFinite(restoreMeta.imageCount) && restoreMeta.version !== 3 && stagedStats.imageCount !== restoreMeta.imageCount) {
+      throw new Error('暂存资料数量校验失败：imageCount');
+    }
+    dom.backupProgress.textContent = '正在切换到已验证的资料库…';
+    await activateStagedSnapshot(restoreMeta);
+    await refresh();
+    await refreshStorageStatus();
+    dom.backupProgress.textContent = `恢复完成：${restoreMeta.bookmarkCount || state.bookmarks.length} 个收藏。`;
+    toast('完整恢复成功');
+  } catch (error) {
+    await clearStagedSnapshot().catch(() => {});
+    dom.backupProgress.textContent = `恢复失败：${error.message || '未知错误'}。原资料库未切换。`;
+    toast(error.message || '恢复失败，原资料库未改变');
   } finally {
+    dom.exportButton.disabled = false;
     dom.importInput.value = '';
   }
 }
@@ -690,12 +1022,26 @@ dom.mobileCategoryList.addEventListener('click', (event) => {
   closeDialog(dom.mobileCategoryDialog);
   navigate(view);
 });
-dom.settingsButton.addEventListener('click', () => { render(); openDialog(dom.settingsDialog); });
+dom.settingsButton.addEventListener('click', () => {
+  render();
+  openDialog(dom.settingsDialog);
+  refreshStorageStatus().catch((error) => { dom.storageSummary.textContent = error.message || '无法读取存储状态'; });
+});
+dom.persistStorageButton.addEventListener('click', () => requestPersistentStorage().catch((error) => toast(error.message)));
+dom.migrateImagesButton.addEventListener('click', migrateLegacyLibrary);
+dom.confirmMigrationButton?.addEventListener('click', async () => {
+  await setMeta('imageMigrationPreviewedAt', new Date().toISOString());
+  await runLegacyMigration();
+});
+dom.cancelPreviewButton?.addEventListener('click', () => {
+  hideQualityPreview();
+  refreshStorageStatus().catch(() => {});
+});
 dom.bookmarkForm.addEventListener('submit', saveForm);
 dom.creatorForm.addEventListener('submit', saveCreatorForm);
 dom.categoryForm.addEventListener('submit', addCategory);
 dom.exportButton.addEventListener('click', exportCollection);
-dom.importInput.addEventListener('change', () => importCollection(dom.importInput.files[0]));
+dom.importInput.addEventListener('change', () => importCollection(dom.importInput.files));
 dom.imageInput.addEventListener('change', () => {
   const files = [...dom.imageInput.files];
   if (!files.length) return;
@@ -714,7 +1060,7 @@ dom.creatorNameInput.addEventListener('input', () => {
 dom.categoryInput.addEventListener('change', syncNoImageOption);
 dom.noImageInput.addEventListener('change', syncNoImageOption);
 dom.aspectRatioInput.addEventListener('change', updatePreviewRatio);
-dom.search.addEventListener('input', () => { state.query = dom.search.value; render(); });
+dom.search.addEventListener('input', () => { state.query = dom.search.value; state.renderLimit = 60; render(); });
 dom.sortSelect.addEventListener('change', () => {
   state.sortMode = dom.sortSelect.value;
   try {
@@ -730,6 +1076,11 @@ dom.categoryNav.addEventListener('click', (event) => {
   navigate(view);
 });
 dom.content.addEventListener('click', (event) => {
+  if (event.target.closest('[data-load-more]')) {
+    state.renderLimit += 60;
+    render();
+    return;
+  }
   const openCreatorId = event.target.closest('[data-open-creator]')?.dataset.openCreator;
   if (openCreatorId) return navigate(`creator:${openCreatorId}`);
   const editCreatorId = event.target.closest('[data-edit-creator]')?.dataset.editCreator;

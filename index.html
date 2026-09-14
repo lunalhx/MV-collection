@@ -7,7 +7,7 @@
   <meta name="description" content="本地优先的私人视觉书签收藏库">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=20260914-4">
+  <link rel="stylesheet" href="css/style.css?v=20260914-6">
   <title>My Collection</title>
 </head>
 <body>
@@ -86,6 +86,7 @@
           <label class="field"><span>分类</span><select id="categoryInput" name="category" required></select></label>
           <label class="field"><span>所属博主（可选）</span><select id="creatorInput" name="creator"></select></label>
           <label class="no-image-option" id="noImageField" hidden><input id="noImageInput" type="checkbox"><span><b>无需图片</b><small>仅用于网站分类，以文字卡片显示</small></span></label>
+          <label class="no-image-option" id="losslessField"><input id="losslessInput" type="checkbox"><span><b>截图 / 二维码 / 界面</b><small>无损保存，避免小字发糊</small></span></label>
           <label class="field"><span>显示比例</span><select id="aspectRatioInput" name="aspectRatio">
             <option value="3:2" selected>3:2 · 横向海报</option>
             <option value="3:4">3:4 · 竖版照片</option>
@@ -140,12 +141,34 @@
         <div id="categoryManager" class="category-manager"></div>
         <form id="categoryForm" class="inline-form"><input id="newCategoryInput" required maxlength="30" placeholder="新分类名称"><button class="button button-quiet" type="submit">添加分类</button></form>
       </section>
-      <section class="settings-section backup-section">
-        <div><h3>备份与恢复</h3><p>图片会一起写入 JSON 文件。导入时，相同 ID 的项目会被更新。</p></div>
-        <div class="backup-actions">
-          <button class="button button-quiet" id="exportButton" type="button">导出收藏</button>
-          <label class="button button-quiet file-button">导入收藏<input id="importInput" type="file" accept="application/json,.json"></label>
+      <section class="settings-section storage-section">
+        <div><h3>本地存储</h3><p>收藏只保存在这台设备。列表先读缩略图，旧 PNG 可分批转换为高质量 WebP。</p></div>
+        <div class="storage-meter" aria-hidden="true"><i id="storageMeterBar"></i></div>
+        <p id="storageSummary">正在读取存储状态…</p>
+        <p id="storageBreakdown"></p>
+        <p id="persistenceSummary"></p>
+        <p id="backupStatus"></p>
+        <p class="migration-status" id="migrationStatus"></p>
+        <div id="qualityPreview" class="quality-preview" hidden>
+          <p>请对比原图、WebP 0.90 和 WebP 0.85。确认画质后再开始批量优化。</p>
+          <div id="qualityPreviewGrid" class="quality-preview-grid"></div>
+          <div class="storage-actions">
+            <button class="button button-quiet" id="confirmMigrationButton" type="button">画质可以，开始优化</button>
+            <button class="button button-quiet" id="cancelPreviewButton" type="button">取消</button>
+          </div>
         </div>
+        <div class="storage-actions">
+          <button class="button button-quiet" id="persistStorageButton" type="button">保护本地数据</button>
+          <button class="button button-quiet" id="migrateImagesButton" type="button">优化旧图片</button>
+        </div>
+      </section>
+      <section class="settings-section backup-section">
+        <div><h3>备份与恢复</h3><p>Mac 主库导出带校验的分卷文件。恢复会在完整验证后替换本机资料库，不会自动合并。</p></div>
+        <div class="backup-actions">
+          <button class="button button-quiet" id="exportButton" type="button">导出完整备份</button>
+          <label class="button button-quiet file-button">完整替换恢复<input id="importInput" type="file" accept="application/json,.json,.mvpart,application/octet-stream" multiple></label>
+        </div>
+        <p class="backup-progress" id="backupProgress"></p>
       </section>
       <p class="storage-note">所有数据只保存在当前浏览器的 IndexedDB 中，不会上传。</p>
     </div>
@@ -164,6 +187,6 @@
   <div class="menu" id="cardMenu" role="menu" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="js/app.js?v=20260914-3"></script>
+  <script type="module" src="js/app.js?v=20260914-6"></script>
 </body>
 </html>
