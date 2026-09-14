@@ -18,6 +18,7 @@ import {
 import { createBackup, downloadBackup, parseBackup } from './backup.js?v=20260913-2';
 import {
   ASPECT_RATIOS,
+  categoryIconKey,
   getBookmarkImages,
   isCreatorWorksCategory,
   positionMenu,
@@ -26,8 +27,9 @@ import {
   renderContent,
   renderCreatorOptions,
   renderNavigation,
+  navigationIcon,
   sortBookmarks
-} from './ui.js?v=20260913-6';
+} from './ui.js?v=20260914-2';
 
 const dom = {
   content: document.querySelector('#content'),
@@ -40,6 +42,9 @@ const dom = {
   addButtonLabel: document.querySelector('#addButtonLabel'),
   heroAddButton: document.querySelector('[data-hero-add]'),
   settingsButton: document.querySelector('#settingsButton'),
+  mobileCategoriesButton: document.querySelector('#mobileCategoriesButton'),
+  mobileCategoryDialog: document.querySelector('#mobileCategoryDialog'),
+  mobileCategoryList: document.querySelector('#mobileCategoryList'),
   bookmarkDialog: document.querySelector('#bookmarkDialog'),
   settingsDialog: document.querySelector('#settingsDialog'),
   bookmarkForm: document.querySelector('#bookmarkForm'),
@@ -239,8 +244,42 @@ function countsByCategory() {
   return counts;
 }
 
+function renderMobileCategoryList() {
+  const counts = countsByCategory();
+  dom.mobileCategoryList.replaceChildren();
+  state.categories.filter((category) => !category.system && !isCreatorWorksCategory(category)).forEach((category) => {
+    const button = document.createElement('button');
+    button.className = `mobile-category-option${state.activeView === category.id ? ' is-active' : ''}`;
+    button.type = 'button';
+    button.dataset.view = category.id;
+    if (state.activeView === category.id) button.setAttribute('aria-current', 'page');
+
+    const mark = document.createElement('span');
+    mark.className = 'mobile-category-mark';
+    mark.setAttribute('aria-hidden', 'true');
+    mark.append(navigationIcon(categoryIconKey(category)));
+
+    const copy = document.createElement('span');
+    copy.className = 'mobile-category-copy';
+    const name = document.createElement('strong');
+    name.textContent = category.name;
+    const count = document.createElement('small');
+    count.textContent = `${counts.get(category.id) || 0} 个收藏`;
+    copy.append(name, count);
+
+    const arrow = document.createElement('span');
+    arrow.className = 'mobile-category-arrow';
+    arrow.setAttribute('aria-hidden', 'true');
+    arrow.textContent = '›';
+    button.append(mark, copy, arrow);
+    dom.mobileCategoryList.append(button);
+  });
+  dom.mobileCategoriesButton.classList.toggle('is-active', state.categories.some((category) => category.id === state.activeView));
+}
+
 function renderCategoryOrdering(includeContent = false) {
   renderNavigation(dom.categoryNav, state.categories, state.activeView);
+  renderMobileCategoryList();
   renderCategoryOptions(dom.categoryInput, state.categories, dom.categoryInput.value);
   renderCategoryManager(dom.categoryManager, state.categories, countsByCategory());
   if (includeContent && state.activeView === 'home' && !state.query.trim()) {
@@ -273,6 +312,7 @@ function render() {
   document.body.classList.toggle('is-home-view', isHomeView);
   document.body.classList.toggle('is-creator-detail', isCreatorDetail);
   renderNavigation(dom.categoryNav, state.categories, state.activeView);
+  renderMobileCategoryList();
   renderContent(dom.content, state.bookmarks, state.categories, state.creators, state.activeView, state.query, state.sortMode);
   renderCategoryOptions(dom.categoryInput, state.categories, dom.categoryInput.value);
   renderCreatorOptions(dom.creatorInput, state.creators, dom.creatorInput.value);
@@ -590,6 +630,17 @@ async function handleCategoryAction(target) {
   }
 }
 
+async function updateCategoryIcon(id, icon) {
+  const category = state.categories.find((item) => item.id === id);
+  if (!category) return;
+  const updated = { ...category };
+  if (icon) updated.icon = icon;
+  else delete updated.icon;
+  await saveCategory(updated);
+  await refresh();
+  toast(icon ? '分类图标已更新' : '已恢复自动匹配图标');
+}
+
 async function exportCollection() {
   if (!state.bookmarks.length && !state.creators.length) {
     toast('还没有可导出的收藏');
@@ -632,6 +683,13 @@ function handlePrimaryAdd() {
 
 dom.addButton.addEventListener('click', handlePrimaryAdd);
 dom.heroAddButton.addEventListener('click', () => showAddDialog());
+dom.mobileCategoriesButton.addEventListener('click', () => { renderMobileCategoryList(); openDialog(dom.mobileCategoryDialog); });
+dom.mobileCategoryList.addEventListener('click', (event) => {
+  const view = event.target.closest('[data-view]')?.dataset.view;
+  if (!view) return;
+  closeDialog(dom.mobileCategoryDialog);
+  navigate(view);
+});
 dom.settingsButton.addEventListener('click', () => { render(); openDialog(dom.settingsDialog); });
 dom.bookmarkForm.addEventListener('submit', saveForm);
 dom.creatorForm.addEventListener('submit', saveCreatorForm);
@@ -708,6 +766,10 @@ dom.menu.addEventListener('click', (event) => {
   if (action) handleMenuAction(action, dom.menu.dataset.bookmarkId).catch((error) => toast(error.message));
 });
 dom.categoryManager.addEventListener('click', (event) => handleCategoryAction(event.target).catch((error) => toast(error.message)));
+dom.categoryManager.addEventListener('change', (event) => {
+  const select = event.target.closest('[data-category-icon]');
+  if (select) updateCategoryIcon(select.dataset.categoryIcon, select.value).catch((error) => toast(error.message));
+});
 let categoryPointerDrag = null;
 let categoryAutoScrollFrame = null;
 let categoryAutoScrollSpeed = 0;

@@ -101,6 +101,60 @@ function element(tag, className, text) {
   return node;
 }
 
+const NAV_ICON_MARKUP = Object.freeze({
+  home: '<path d="M3.5 10.5 12 3.5l8.5 7"></path><path d="M5.5 9.2V20h13V9.2"></path><path d="M9.5 20v-6h5v6"></path>',
+  all: '<rect x="3.5" y="4" width="4.5" height="16" rx="1.2"></rect><rect x="9.75" y="4" width="4.5" height="16" rx="1.2"></rect><rect x="16" y="4" width="4.5" height="16" rx="1.2"></rect>',
+  creators: '<circle cx="12" cy="8" r="3.5"></circle><path d="M5 20c.7-4 3.2-6 7-6s6.3 2 7 6"></path>',
+  movies: '<rect x="3" y="5" width="18" height="14" rx="2.5"></rect><path d="M3 9h18M7 5v4M12 5v4M17 5v4"></path>',
+  series: '<rect x="6" y="5" width="15" height="15" rx="2.5"></rect><path d="M3 16V6a3 3 0 0 1 3-3h11"></path>',
+  anime: '<circle cx="12" cy="12" r="8.5"></circle><path d="m10 8 6 4-6 4Z"></path><path d="M18.8 3.2v2.4M17.6 4.4H20"></path>',
+  websites: '<circle cx="12" cy="12" r="9"></circle><path d="M3.5 12h17M12 3c2.3 2.5 3.5 5.5 3.5 9s-1.2 6.5-3.5 9c-2.3-2.5-3.5-5.5-3.5-9S9.7 5.5 12 3Z"></path>',
+  star: '<path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z"></path>',
+  camera: '<rect x="3" y="6.5" width="18" height="13" rx="2.5"></rect><path d="m8 6.5 1.3-2h5.4l1.3 2"></path><circle cx="12" cy="13" r="3.5"></circle>',
+  music: '<path d="M9 18V6l10-2v12"></path><circle cx="6.5" cy="18" r="2.5"></circle><circle cx="16.5" cy="16" r="2.5"></circle>',
+  book: '<path d="M4 4.5h5.5A2.5 2.5 0 0 1 12 7v13a3 3 0 0 0-3-3H4Z"></path><path d="M20 4.5h-5.5A2.5 2.5 0 0 0 12 7v13a3 3 0 0 1 3-3h5Z"></path>',
+  fallback: '<path d="M5 4.5h14v16l-7-4-7 4Z"></path>'
+});
+
+const CATEGORY_ICON_OPTIONS = [
+  ['', '自动匹配'],
+  ['movies', '电影'],
+  ['series', '剧集'],
+  ['anime', '播放'],
+  ['websites', '网站'],
+  ['creators', '人物'],
+  ['camera', '摄影'],
+  ['music', '音乐'],
+  ['book', '书籍'],
+  ['star', '精选'],
+  ['all', '馆藏'],
+  ['fallback', '书签']
+];
+
+export function categoryIconKey(category) {
+  if (category?.icon && NAV_ICON_MARKUP[category.icon]) return category.icon;
+  const name = category?.name?.trim().toLocaleLowerCase('zh-CN') || '';
+  if (/(电影|影片|movie|film|cinema)/.test(name)) return 'movies';
+  if (/(剧集|电视剧|连续剧|series|show|drama)/.test(name)) return 'series';
+  if (/(动漫|动画|anime|animation)/.test(name)) return 'anime';
+  if (/(网站|网页|网址|web|site)/.test(name)) return 'websites';
+  if (/(博主|人物|女优|演员|导演|作者|creator|person|actor)/.test(name)) return 'creators';
+  if (/(摄影|照片|相册|photo|camera)/.test(name)) return 'camera';
+  if (/(音乐|歌曲|专辑|music|song|album)/.test(name)) return 'music';
+  if (/(书|阅读|小说|漫画|book|read|novel|manga)/.test(name)) return 'book';
+  if (/(精选|喜欢|最爱|推荐|favorite|favourite|star)/.test(name)) return 'star';
+  return 'fallback';
+}
+
+export function navigationIcon(id) {
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.classList.add('nav-icon');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = NAV_ICON_MARKUP[id] || NAV_ICON_MARKUP.fallback;
+  return icon;
+}
+
 function websitePlaceholder(url) {
   let hostname = 'WEBSITE';
   try {
@@ -342,9 +396,11 @@ export function renderNavigation(container, categories, activeView) {
   container.replaceChildren();
   [{ id: 'home', name: '首页' }, { id: 'all', name: '全部收藏' }, { id: 'creators', name: '博主' }, ...categories.filter((item) => !item.system && !isCreatorWorksCategory(item))].forEach((item) => {
     const isActive = activeView === item.id || (item.id === 'creators' && activeView.startsWith('creator:'));
-    const button = element('button', `nav-link${isActive ? ' is-active' : ''}`, item.name);
+    const button = element('button', `nav-link${isActive ? ' is-active' : ''}`);
     button.type = 'button';
     button.dataset.view = item.id;
+    const iconKey = ['home', 'all', 'creators'].includes(item.id) ? item.id : categoryIconKey(item);
+    button.append(navigationIcon(iconKey), element('span', 'nav-label', item.name));
     container.append(button);
   });
 }
@@ -450,7 +506,20 @@ export function renderCategoryManager(container, categories, bookmarkCounts) {
     handle.title = '拖动排序';
     handle.innerHTML = '<svg viewBox="0 0 12 18" aria-hidden="true"><circle cx="3" cy="3" r="1.2"></circle><circle cx="9" cy="3" r="1.2"></circle><circle cx="3" cy="9" r="1.2"></circle><circle cx="9" cy="9" r="1.2"></circle><circle cx="3" cy="15" r="1.2"></circle><circle cx="9" cy="15" r="1.2"></circle></svg>';
 
+    const identity = element('span', 'category-identity');
+    const preview = element('span', 'category-icon-preview');
+    preview.append(navigationIcon(categoryIconKey(category)));
     const name = element('span', 'category-name', `${category.name} · ${bookmarkCounts.get(category.id) || 0}`);
+    const iconSelect = element('select', 'category-icon-select');
+    iconSelect.dataset.categoryIcon = category.id;
+    iconSelect.setAttribute('aria-label', `“${category.name}”的图标`);
+    CATEGORY_ICON_OPTIONS.forEach(([value, label]) => {
+      const option = element('option', '', label);
+      option.value = value;
+      option.selected = (category.icon || '') === value;
+      iconSelect.append(option);
+    });
+    identity.append(preview, name, iconSelect);
     const orderControls = element('span', 'category-order-controls');
     const moveUp = element('button', 'mini-button move-button', '↑');
     moveUp.type = 'button';
@@ -481,7 +550,7 @@ export function renderCategoryManager(container, categories, bookmarkCounts) {
     if (isCreatorWorksCategory(category)) {
       actions.append(element('span', 'category-system-label', '侧栏隐藏'));
     }
-    row.append(handle, name, orderControls, actions);
+    row.append(handle, identity, orderControls, actions);
     container.append(row);
   });
 }

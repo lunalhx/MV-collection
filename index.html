@@ -7,7 +7,7 @@
   <meta name="description" content="本地优先的私人视觉书签收藏库">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=20260914-1">
+  <link rel="stylesheet" href="css/style.css?v=20260914-4">
   <title>My Collection</title>
 </head>
 <body>
@@ -19,8 +19,12 @@
       </a>
       <nav class="category-nav" id="categoryNav" aria-label="收藏分类"></nav>
       <div class="sidebar-bottom">
+        <button class="side-link mobile-only-nav" id="mobileCategoriesButton" type="button" aria-haspopup="dialog" aria-controls="mobileCategoryDialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.8"></rect><rect x="13.5" y="3.5" width="7" height="7" rx="1.8"></rect><rect x="3.5" y="13.5" width="7" height="7" rx="1.8"></rect><rect x="13.5" y="13.5" width="7" height="7" rx="1.8"></rect></svg>
+          分类
+        </button>
         <button class="side-link" id="settingsButton" type="button">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h6M14 6.5h6"></path><circle cx="12" cy="6.5" r="2"></circle><path d="M4 12h11M19 12h1"></path><circle cx="17" cy="12" r="2"></circle><path d="M4 17.5h2M10 17.5h10"></path><circle cx="8" cy="17.5" r="2"></circle></svg>
           设置
         </button>
         <span class="side-link side-link-muted">仅在本地保存</span>
@@ -147,9 +151,19 @@
     </div>
   </dialog>
 
+  <dialog class="modal mobile-category-modal" id="mobileCategoryDialog" aria-labelledby="mobileCategoryTitle">
+    <div class="modal-card mobile-category-sheet">
+      <div class="modal-heading">
+        <div><p class="eyebrow">COLLECTIONS</p><h2 id="mobileCategoryTitle">浏览分类</h2></div>
+        <button class="icon-button modal-close" type="button" data-close-dialog="mobileCategoryDialog" aria-label="关闭">×</button>
+      </div>
+      <nav class="mobile-category-list" id="mobileCategoryList" aria-label="选择收藏分类"></nav>
+    </div>
+  </dialog>
+
   <div class="menu" id="cardMenu" role="menu" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="js/app.js?v=20260913-6"></script>
+  <script type="module" src="js/app.js?v=20260914-3"></script>
 </body>
 </html>
