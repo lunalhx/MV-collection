@@ -560,6 +560,20 @@ export function bookmarkMatchesView(bookmark, activeView, categoryName = '') {
   return bookmark.category === activeView;
 }
 
+export function bookmarksForView(bookmarks, categories, activeView, query = '') {
+  const categoryMap = new Map(categories.map((category) => [category.id, category.name]));
+  const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN');
+  if (activeView.startsWith('creator:')) {
+    const creatorId = activeView.slice(8);
+    return bookmarks.filter((bookmark) => bookmark.creatorId === creatorId && (!normalizedQuery || `${bookmark.title} ${categoryMap.get(bookmark.category) || ''}`.toLocaleLowerCase('zh-CN').includes(normalizedQuery)));
+  }
+  return bookmarks.filter((bookmark) => {
+    const categoryName = categoryMap.get(bookmark.category) || '';
+    const matchesQuery = !normalizedQuery || `${bookmark.title} ${categoryName}`.toLocaleLowerCase('zh-CN').includes(normalizedQuery);
+    return matchesQuery && bookmarkMatchesView(bookmark, activeView, categoryName);
+  });
+}
+
 export function renderContent(container, bookmarks, categories, creators, activeView, query, sortMode = 'createdAt', renderLimit = 60) {
   clearObjectUrls();
   container.replaceChildren();
@@ -576,12 +590,7 @@ export function renderContent(container, bookmarks, categories, creators, active
     return;
   }
   const sorted = sortBookmarks(bookmarks, sortMode);
-  const visible = sorted.filter((bookmark) => {
-    const categoryName = categoryMap.get(bookmark.category) || '';
-    const matchesQuery = !normalizedQuery || `${bookmark.title} ${categoryName}`.toLocaleLowerCase('zh-CN').includes(normalizedQuery);
-    const matchesView = bookmarkMatchesView(bookmark, activeView, categoryName);
-    return matchesQuery && matchesView;
-  });
+  const visible = bookmarksForView(sorted, categories, activeView, query);
 
   if (!visible.length) {
     container.append(emptyState(Boolean(normalizedQuery) || !['home', 'all'].includes(activeView)));

@@ -36,6 +36,7 @@ import { serializeClickLedger } from './clicks.js?v=20260914-1';
 import { IMAGE_POLICY, prepareImage } from './media.js?v=20260914-2';
 import {
   ASPECT_RATIOS,
+  bookmarksForView,
   categoryIconKey,
   isCreatorWorksCategory,
   positionMenu,
@@ -47,7 +48,7 @@ import {
   navigationIcon,
   setImageBlobLoader,
   sortBookmarks
-} from './ui.js?v=20260914-4';
+} from './ui.js?v=20260917-1';
 
 const dom = {
   content: document.querySelector('#content'),
@@ -580,8 +581,8 @@ function render() {
   renderCategoryOptions(dom.categoryInput, state.categories, dom.categoryInput.value);
   renderCreatorOptions(dom.creatorInput, state.creators, dom.creatorInput.value);
   renderCategoryManager(dom.categoryManager, state.categories, countsByCategory());
-  const creatorWorkCount = activeCreator ? state.bookmarks.filter((bookmark) => bookmark.creatorId === activeCreator.id).length : 0;
-  dom.count.textContent = state.activeView === 'creators' ? `${state.creators.length} 位博主` : isCreatorDetail ? `${creatorWorkCount} 个作品` : `${state.bookmarks.length} 个收藏`;
+  const visibleBookmarkCount = bookmarksForView(state.bookmarks, state.categories, state.activeView, state.query).length;
+  dom.count.textContent = state.activeView === 'creators' ? `${state.creators.length} 位博主` : isCreatorDetail ? `${visibleBookmarkCount} 个作品` : `${visibleBookmarkCount} 个收藏`;
   const activeCategory = state.categories.find((category) => category.id === state.activeView);
   const title = state.query ? '搜索结果' : activeCreator?.name || (state.activeView === 'creators' ? '博主' : activeCategory?.name || (state.activeView === 'all' ? '全部收藏' : state.sortMode === 'clickCount' ? '最常打开' : '最近添加'));
   dom.collectionTitle.innerHTML = `${title} <span aria-hidden="true">›</span>`;
