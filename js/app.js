@@ -76,6 +76,8 @@ const dom = {
   aspectRatioInput: document.querySelector('#aspectRatioInput'),
   imageInput: document.querySelector('#imageInput'),
   imageField: document.querySelector('#imageField'),
+  imageOrder: document.querySelector('#imageOrder'),
+  imageOrderList: document.querySelector('#imageOrderList'),
   imagePreview: document.querySelector('#imagePreview'),
   previewRatioLabel: document.querySelector('#previewRatioLabel'),
   fileName: document.querySelector('#fileName'),
@@ -146,6 +148,8 @@ const state = {
   renderLimit: 60,
   editingImages: [],
   editingImageIds: [],
+  selectedImages: [],
+  selectedImageUrls: [],
   previewUrl: null,
   editingCreatorAvatar: null,
   creatorPreviewUrl: null
@@ -211,6 +215,57 @@ function setPreview(blob) {
   dom.imagePreview.classList.toggle('has-image', Boolean(blob));
 }
 
+function clearSelectedImages() {
+  state.selectedImageUrls.forEach((url) => URL.revokeObjectURL(url));
+  state.selectedImageUrls = [];
+  state.selectedImages = [];
+}
+
+function formImages() {
+  return state.selectedImages.length ? state.selectedImages : state.editingImages;
+}
+
+function updateImageOrder() {
+  const images = formImages();
+  dom.imageOrder.hidden = images.length < 2;
+  dom.imageOrderList.replaceChildren();
+  if (images.length < 2) return;
+  images.forEach((image, index) => {
+    const item = document.createElement('li');
+    item.className = 'image-order-item';
+    item.draggable = true;
+    item.dataset.index = index;
+    const preview = document.createElement('img');
+    preview.src = state.selectedImages.length ? state.selectedImageUrls[index] : URL.createObjectURL(image);
+    preview.alt = `第 ${index + 1} 张图片`;
+    if (!state.selectedImages.length) preview.addEventListener('load', () => URL.revokeObjectURL(preview.src), { once: true });
+    const position = document.createElement('b');
+    position.className = 'image-order-position';
+    position.textContent = index + 1;
+    const controls = document.createElement('div');
+    controls.className = 'image-order-controls';
+    controls.innerHTML = `<button type="button" data-image-move="previous" aria-label="将第 ${index + 1} 张图片前移" ${index === 0 ? 'disabled' : ''}>←</button><button type="button" data-image-move="next" aria-label="将第 ${index + 1} 张图片后移" ${index === images.length - 1 ? 'disabled' : ''}>→</button>`;
+    item.append(preview, position, controls);
+    dom.imageOrderList.append(item);
+  });
+}
+
+function moveFormImage(from, to) {
+  const images = state.selectedImages.length ? state.selectedImages : state.editingImages;
+  if (from === to || from < 0 || to < 0 || from >= images.length || to >= images.length) return;
+  const [image] = images.splice(from, 1);
+  images.splice(to, 0, image);
+  if (state.selectedImages.length) {
+    const [url] = state.selectedImageUrls.splice(from, 1);
+    state.selectedImageUrls.splice(to, 0, url);
+  } else {
+    const [id] = state.editingImageIds.splice(from, 1);
+    state.editingImageIds.splice(to, 0, id);
+  }
+  setPreview(images[0]);
+  updateImageOrder();
+}
+
 function setCreatorPreview(blob, name = '') {
   if (state.creatorPreviewUrl) URL.revokeObjectURL(state.creatorPreviewUrl);
   state.creatorPreviewUrl = blob ? URL.createObjectURL(blob) : null;
@@ -234,15 +289,18 @@ function syncNoImageOption() {
   dom.imageField.classList.toggle('is-disabled', withoutImage);
   if (withoutImage) {
     dom.imageInput.value = '';
+    clearSelectedImages();
     dom.fileName.textContent = '将使用文字网址卡片';
     setPreview(null);
+    updateImageOrder();
     return;
   }
-  const selectedFile = dom.imageInput.files[0];
+  const selectedFile = state.selectedImages[0];
   setPreview(selectedFile || state.editingImages[0] || null);
-  if (selectedFile) dom.fileName.textContent = dom.imageInput.files.length === 1 ? selectedFile.name : `已选择 ${dom.imageInput.files.length} 张图片`;
+  if (selectedFile) dom.fileName.textContent = state.selectedImages.length === 1 ? selectedFile.name : `已选择 ${state.selectedImages.length} 张图片`;
   else if (state.editingImages.length) dom.fileName.textContent = `保留当前 ${state.editingImages.length} 张图片`;
   else dom.fileName.textContent = 'JPG、PNG、WEBP';
+  updateImageOrder();
 }
 
 async function storeImageAssets(blobs, options = {}) {
@@ -560,6 +618,7 @@ function resetBookmarkForm(creatorId = '') {
   dom.fileName.textContent = 'JPG、PNG、WEBP';
   state.editingImages = [];
   state.editingImageIds = [];
+  clearSelectedImages();
   if (dom.losslessInput) dom.losslessInput.checked = false;
   setPreview(null);
   dom.aspectRatioInput.selectedIndex = 0;
@@ -595,6 +654,7 @@ async function showEditDialog(id, replaceImage = false) {
   syncNoImageOption();
   dom.fileName.textContent = replaceImage ? '请选择新的图片组' : `保留当前 ${state.editingImages.length} 张图片`;
   if (dom.noImageInput.checked) dom.fileName.textContent = '将使用文字网址卡片';
+  updateImageOrder();
   openDialog(dom.bookmarkDialog);
 }
 
@@ -605,7 +665,7 @@ async function saveForm(event) {
   try {
     const existing = dom.bookmarkId.value ? await getBookmark(dom.bookmarkId.value) : null;
     const withoutImage = dom.categoryInput.value === 'websites' && dom.noImageInput.checked;
-    const selectedFiles = [...dom.imageInput.files];
+    const selectedFiles = state.selectedImages;
     let imageIds = withoutImage ? [] : state.editingImageIds;
     if (!withoutImage && selectedFiles.length) imageIds = await storeImageAssets(selectedFiles, { lossless: dom.losslessInput?.checked, name: selectedFiles[0].name });
     else if (!withoutImage && !imageIds.length && state.editingImages.length) imageIds = await storeImageAssets(state.editingImages);
@@ -1101,8 +1161,43 @@ dom.importDeltaInput?.addEventListener('change', () => importCollection(dom.impo
 dom.imageInput.addEventListener('change', () => {
   const files = [...dom.imageInput.files];
   if (!files.length) return;
+  clearSelectedImages();
+  state.selectedImages = files;
+  state.selectedImageUrls = files.map((file) => URL.createObjectURL(file));
   dom.fileName.textContent = files.length === 1 ? files[0].name : `已选择 ${files.length} 张图片`;
   setPreview(files[0]);
+  updateImageOrder();
+});
+dom.imageOrderList.addEventListener('click', (event) => {
+  const direction = event.target.closest('[data-image-move]')?.dataset.imageMove;
+  const item = event.target.closest('.image-order-item');
+  if (!direction || !item) return;
+  const from = Number(item.dataset.index);
+  moveFormImage(from, direction === 'previous' ? from - 1 : from + 1);
+});
+let draggedImageIndex = null;
+dom.imageOrderList.addEventListener('dragstart', (event) => {
+  const item = event.target.closest('.image-order-item');
+  if (!item) return;
+  draggedImageIndex = Number(item.dataset.index);
+  item.classList.add('is-dragging');
+  event.dataTransfer.effectAllowed = 'move';
+});
+dom.imageOrderList.addEventListener('dragover', (event) => {
+  if (draggedImageIndex === null) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+});
+dom.imageOrderList.addEventListener('drop', (event) => {
+  const item = event.target.closest('.image-order-item');
+  if (!item || draggedImageIndex === null) return;
+  event.preventDefault();
+  moveFormImage(draggedImageIndex, Number(item.dataset.index));
+  draggedImageIndex = null;
+});
+dom.imageOrderList.addEventListener('dragend', () => {
+  draggedImageIndex = null;
+  dom.imageOrderList.querySelectorAll('.is-dragging').forEach((item) => item.classList.remove('is-dragging'));
 });
 dom.creatorAvatarInput.addEventListener('change', () => {
   const file = dom.creatorAvatarInput.files[0];

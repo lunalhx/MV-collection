@@ -364,6 +364,23 @@ main { padding: 0 0 max(70px, env(safe-area-inset-bottom)); }
 .file-picker b { font-size: 13px; font-weight: 550; }
 .file-picker small { margin-top: 3px; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
 .file-field.is-disabled { opacity: .38; pointer-events: none; }
+.image-order { padding: 12px; border: 1px solid rgba(255,255,255,.08); border-radius: 7px; background: rgba(255,255,255,.025); }
+.image-order[hidden] { display: none; }
+.image-order-heading { display: grid; gap: 3px; margin-bottom: 10px; }
+.image-order-heading > span { color: #d8d4cd; font-size: 12px; font-weight: 600; }
+.image-order-heading small { color: var(--faint); font-size: 10px; line-height: 1.45; }
+.image-order-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(54px, 1fr)); gap: 7px; margin: 0; padding: 0; list-style: none; }
+.image-order-item { position: relative; aspect-ratio: 1; overflow: hidden; border: 1px solid rgba(255,255,255,.1); border-radius: 5px; background: #0c0c0b; cursor: grab; transition: transform 150ms ease, opacity 150ms ease, border-color 150ms ease; }
+.image-order-item:hover { border-color: rgba(243,241,237,.42); transform: translateY(-1px); }
+.image-order-item.is-dragging { opacity: .35; }
+.image-order-item img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.image-order-position { position: absolute; top: 4px; left: 4px; display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: var(--accent); color: #17130d; font-size: 10px; line-height: 1; }
+.image-order-controls { position: absolute; right: 3px; bottom: 3px; display: flex; overflow: hidden; border: 1px solid rgba(255,255,255,.2); border-radius: 4px; background: rgba(10,10,9,.84); opacity: 0; transition: opacity 150ms ease; }
+.image-order-item:hover .image-order-controls, .image-order-item:focus-within .image-order-controls { opacity: 1; }
+.image-order-controls button { width: 20px; height: 20px; padding: 0; border: 0; background: transparent; color: #f3f1ed; cursor: pointer; font-size: 12px; line-height: 1; }
+.image-order-controls button:disabled { opacity: .28; cursor: default; }
+.image-order-controls button:not(:disabled):hover { background: rgba(255,255,255,.16); }
+@media (hover: none) { .image-order-controls { opacity: 1; } }
 .no-image-option { display: flex; align-items: center; gap: 11px; min-height: 48px; padding: 9px 12px; border-radius: 5px; background: rgba(255,255,255,.04); cursor: pointer; }
 .no-image-option[hidden] { display: none; }
 .no-image-option input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }

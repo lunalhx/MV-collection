@@ -7,7 +7,7 @@
   <meta name="description" content="本地优先的私人视觉书签收藏库">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=20260914-7">
+  <link rel="stylesheet" href="css/style.css?v=20260917-1">
   <title>My Collection</title>
 </head>
 <body>
@@ -92,6 +92,10 @@
             <option value="3:4">3:4 · 竖版照片</option>
           </select></label>
           <label class="field file-field" id="imageField"><span>选择图片（可多选）</span><input id="imageInput" name="image" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple><span class="file-picker"><b>选取一张或多张图片</b><small id="fileName">JPG、PNG、WEBP</small></span></label>
+          <section class="image-order" id="imageOrder" aria-labelledby="imageOrderTitle" hidden>
+            <div class="image-order-heading"><span id="imageOrderTitle">播放顺序</span><small>拖动图片，或用箭头微调；第 1 张会最先展示。</small></div>
+            <ol class="image-order-list" id="imageOrderList"></ol>
+          </section>
         </div>
         <div class="image-preview" id="imagePreview"><span id="previewRatioLabel">3:2</span><p>图片预览</p></div>
       </div>
@@ -189,6 +193,6 @@
   <div class="menu" id="cardMenu" role="menu" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="js/app.js?v=20260914-8"></script>
+  <script type="module" src="js/app.js?v=20260917-1"></script>
 </body>
 </html>
